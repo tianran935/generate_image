@@ -1,0 +1,105 @@
+[
+  {
+    "scenario_id": "scene_000_auto_layout",
+    "title": "Auto layout from SKU list",
+    "sku_ids": [
+      "cereal_001",
+      "cereal_002",
+      "cereal_003",
+      "cereal_004",
+      "cereal_005"
+    ]
+  },
+  {
+    "scenario_id": "scene_001_top_left_vs_bottom_right",
+    "title": "Top-left and bottom-right placement",
+    "placements": [
+      {
+        "sku_id": "cereal_001",
+        "row": 1,
+        "col": 1,
+        "price_style": "regular",
+        "featured": true
+      },
+      {
+        "sku_id": "cereal_002",
+        "row": 1,
+        "col": 3,
+        "price_style": "sale"
+      },
+      {
+        "sku_id": "cereal_003",
+        "row": 2,
+        "col": 2,
+        "price_style": "regular"
+      },
+      {
+        "sku_id": "cereal_004",
+        "row": 3,
+        "col": 5,
+        "price_style": "markdown"
+      }
+    ]
+  },
+  {
+    "scenario_id": "scene_002_middle_shift_demo",
+    "title": "Middle shelf shift demo",
+    "placements": [
+      {
+        "sku_id": "cereal_001",
+        "row": 2,
+        "col": 1,
+        "price_style": "regular"
+      },
+      {
+        "sku_id": "cereal_003",
+        "row": 2,
+        "col": 3,
+        "price_style": "sale",
+        "featured": true
+      },
+      {
+        "sku_id": "cereal_004",
+        "row": 2,
+        "col": 4,
+        "price_style": "regular"
+      },
+      {
+        "sku_id": "cereal_005",
+        "row": 3,
+        "col": 2,
+        "price_style": "markdown"
+      }
+    ]
+  },
+  {
+    "scenario_id": "scene_003_upper_vs_lower_control",
+    "title": "Upper versus lower shelf control",
+    "placements": [
+      {
+        "sku_id": "cereal_002",
+        "row": 1,
+        "col": 2,
+        "price_style": "sale"
+      },
+      {
+        "sku_id": "cereal_003",
+        "row": 1,
+        "col": 4,
+        "price_style": "regular"
+      },
+      {
+        "sku_id": "cereal_001",
+        "row": 3,
+        "col": 2,
+        "price_style": "regular"
+      },
+      {
+        "sku_id": "cereal_004",
+        "row": 3,
+        "col": 4,
+        "price_style": "markdown"
+      }
+    ]
+  }
+]
