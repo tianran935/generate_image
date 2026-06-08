@@ -4,6 +4,8 @@ import argparse
 import base64
 import json
 import os
+import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +13,10 @@ import requests
 
 from shelf_sampling import (
     DEFAULT_CATALOG_FILE,
+    available_categories,
     build_edit_payload,
     build_generate_payload,
+    load_catalog,
     parse_categories,
     sample_products,
 )
@@ -20,6 +24,9 @@ from shelf_sampling import (
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-5.4-image-2"
+DEFAULT_PRODUCT_IMAGE_DIR = Path(__file__).resolve().parents[1] / "pic" / "images"
+SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+IMAGE_SUFFIX_PRIORITY = {".png": 0, ".jpg": 1, ".jpeg": 2, ".webp": 3, ".gif": 4}
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, help="Random seed for sampling and perturbations.")
     parser.add_argument("--input-image", type=Path, help="Original shelf image for edit mode.")
     parser.add_argument("--base-request-file", type=Path, help="Generate request JSON to preserve SKU identities in edit mode.")
+    parser.add_argument("--product-image-dir", type=Path, default=DEFAULT_PRODUCT_IMAGE_DIR, help="Directory containing product reference images.")
+    parser.add_argument("--allow-missing-product-images", action="store_true", help="Allow text-only fallback when some SKU images are missing.")
     parser.add_argument("--request-output-file", type=Path, help="Optional JSON file to save built request payloads.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenRouter image model.")
     parser.add_argument("--aspect-ratio", default="4:3", help="Image aspect ratio.")
@@ -50,31 +59,176 @@ def load_request(path: Path) -> dict[str, Any]:
 
 
 def encode_local_image(path: Path) -> str:
-    suffix = path.suffix.lower()
-    mime = "image/png"
-    if suffix in {".jpg", ".jpeg"}:
-        mime = "image/jpeg"
-    elif suffix == ".webp":
-        mime = "image/webp"
-    encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
-    return f"data:{mime};base64,{encoded}"
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(path) as image:
+        frame = image.convert("RGBA")
+        buffer = BytesIO()
+        frame.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
+
+def image_digits(path: Path) -> str:
+    return "".join(re.findall(r"\d+", path.stem.split("_")[-1]))
+
+
+def image_rank(path: Path) -> int | None:
+    match = re.search(r"rank(\d+)", path.stem, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def list_product_images(product_image_dir: Path) -> list[Path]:
+    if not product_image_dir.exists():
+        return []
+    images = [p for p in product_image_dir.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES]
+    return sorted(images, key=lambda p: (image_rank(p) or 9999, IMAGE_SUFFIX_PRIORITY.get(p.suffix.lower(), 99), p.name))
+
+
+def find_product_image(item: dict[str, Any], product_images: list[Path]) -> Path | None:
+    sku_id = str(item.get("sku_id") or item.get("upc_id") or "").split(".", 1)[0].lstrip("0")
+    if sku_id:
+        for path in product_images:
+            digits = image_digits(path).lstrip("0")
+            if digits.startswith(sku_id):
+                return path.resolve()
+
+    source = item.get("source_row", item)
+    rank = source.get("rank_within_category") if isinstance(source, dict) else None
+    try:
+        rank_int = int(float(rank))
+    except (TypeError, ValueError):
+        return None
+    for path in product_images:
+        if image_rank(path) == rank_int:
+            return path.resolve()
+    return None
+
+
+def attach_product_images_to_payload(
+    payload: dict[str, Any],
+    product_image_dir: Path,
+    allow_missing: bool,
+) -> dict[str, Any]:
+    product_images = list_product_images(product_image_dir)
+    if not product_images:
+        if allow_missing:
+            return payload
+        raise FileNotFoundError(f"No product reference images found in {product_image_dir}")
+
+    missing = []
+    for sku in payload["skus"]:
+        image_path = find_product_image(sku, product_images)
+        if image_path:
+            sku["product_image"] = str(image_path)
+        else:
+            sku.pop("product_image", None)
+            missing.append(f'{sku["sku_id"]} ({sku["item"]})')
+
+    if missing and not allow_missing:
+        raise FileNotFoundError(
+            "Missing product reference images for these SKUs; refusing to generate from text-only cues:\n"
+            + "\n".join(f"- {item}" for item in missing)
+        )
+    return payload
+
+
+def has_product_image(row: dict[str, Any], product_images: list[Path]) -> bool:
+    sku_like = {
+        "sku_id": row.get("upc_id"),
+        "upc_id": row.get("upc_id"),
+        "item": row.get("upc_description"),
+        "source_row": row,
+    }
+    return find_product_image(sku_like, product_images) is not None
+
+
+def sample_products_with_product_images(
+    categories: list[str] | None,
+    sample_size: int,
+    sample_count: int,
+    catalog_file: Path,
+    product_image_dir: Path,
+    seed: int | None,
+) -> list[dict[str, Any]]:
+    rng = random.Random(seed)
+    catalog = load_catalog(catalog_file)
+    product_images = list_product_images(product_image_dir)
+    if not product_images:
+        raise FileNotFoundError(f"No product reference images found in {product_image_dir}")
+
+    requested = categories or available_categories(catalog)
+    samples: list[dict[str, Any]] = []
+    skipped_categories = []
+    for category in requested:
+        rows = [row for row in catalog if str(row["category_name"]) == category]
+        if not rows:
+            raise ValueError(f"Category not found in catalog: {category}")
+        rows_with_images = [row for row in rows if has_product_image(row, product_images)]
+        if len(rows_with_images) < sample_size:
+            if categories:
+                raise ValueError(
+                    f"Category {category} has only {len(rows_with_images)} rows with product images; "
+                    f"cannot sample {sample_size}."
+                )
+            skipped_categories.append(category)
+            continue
+        for sample_index in range(sample_count):
+            samples.append(
+                {
+                    "category": category,
+                    "sample_index": sample_index,
+                    "sample_size": sample_size,
+                    "items": rng.sample(rows_with_images, sample_size),
+                }
+            )
+    if not samples:
+        skipped = ", ".join(skipped_categories) if skipped_categories else "none"
+        raise ValueError(f"No categories have enough product images for sample_size={sample_size}. Skipped: {skipped}")
+    return samples
 
 
 def format_sku_lines(items: list[dict[str, Any]]) -> str:
     lines = []
-    for item in items:
+    for index, item in enumerate(items, start=1):
         promo = item.get("promotion", "none")
         price = item.get("price", "unknown")
         size = item.get("size", "unknown")
-        tags = ", ".join(item.get("tags", [])) or promo
         source = item.get("source_row", {})
         rank = source.get("rank_within_category", "unknown") if isinstance(source, dict) else "unknown"
+        image_note = f", product_reference_image={index}" if item.get("product_image") else ", product_reference_image=missing"
         lines.append(
-            f'- {item["sku_id"]}: item="{item["item"]}", size="{size}", price="{price}", tags="{tags}", '
+            f'- {item["sku_id"]}: item="{item["item"]}", size="{size}", price="{price}", '
             f'promotion="{promo}", category="{item.get("category_name", "unknown")}", source_rank="{rank}", '
-            f'position=(row {item["position"]["row"]}, col {item["position"]["col"]})'
+            f'position=(row {item["position"]["row"]}, col {item["position"]["col"]}){image_note}'
         )
     return "\n".join(lines)
+
+
+def format_product_reference_lines(items: list[dict[str, Any]]) -> str:
+    lines = []
+    for index, item in enumerate(items, start=1):
+        if not item.get("product_image"):
+            continue
+        lines.append(
+            f'- Product reference image {index} is the exact package for SKU {item["sku_id"]}, '
+            f'item="{item["item"]}", position=(row {item["position"]["row"]}, col {item["position"]["col"]}).'
+        )
+    return "\n".join(lines)
+
+
+def product_realism_instructions() -> str:
+    return (
+        "All listed SKUs are real retail products. When product reference images are provided, use those images as the "
+        "primary source of truth for package identity, brand, colors, logos, shape, and front-panel artwork. Do not invent, "
+        "replace, redraw from memory, or hallucinate different packaging. Some item names are abbreviated POS descriptions; "
+        "use the reference images to resolve the true original product packaging rather than generic placeholder packaging. "
+        "The visible package format and apparent package size must match the provided size field: for example, small bags, "
+        "family-size bags, boxes, bottles, cans, jars, tubs, pints, and multi-packs should look physically consistent with "
+        "their stated ounces, fluid ounces, liters, counts, or quarts. "
+    )
 
 
 def build_generate_prompt(payload: dict[str, Any]) -> str:
@@ -88,6 +242,12 @@ def build_generate_prompt(payload: dict[str, Any]) -> str:
         f"Generate one {style} for category {category}. "
         f"{notes} Respect the following structured shelf configuration exactly as much as possible.\n"
         f"{format_sku_lines(payload['skus'])}\n"
+        "Product reference mapping:\n"
+        f"{format_product_reference_lines(payload['skus'])}\n"
+        f"{product_realism_instructions()}"
+        "Use ONLY the provided product reference images for the eight focal products. "
+        "You may adjust perspective, scale, lighting, shadows, and shelf integration so the final scene is realistic, "
+        "but preserve the product package appearance from each reference image. "
         "Use a strict 2 by 4 layout: two horizontal shelf rows and four product columns, for exactly eight focal products. "
         "Render a realistic grocery shelf photograph that matches a real supermarket shelf. "
         "The shelf should be densely stocked and visually full, with products filling almost all visible facing space. "
@@ -108,8 +268,13 @@ def build_edit_prompt(payload: dict[str, Any]) -> str:
         f"Edit the provided grocery shelf image. {notes} "
         "Update it to reflect the following structured shelf configuration exactly as much as possible.\n"
         f"{format_sku_lines(payload['skus'])}\n"
+        "Product reference mapping:\n"
+        f"{format_product_reference_lines(payload['skus'])}\n"
+        f"{product_realism_instructions()}"
+        "Use the product reference images as the exact package sources for the eight focal products. "
         "Do not change product identities, shelf framing, background, lighting, camera angle, or visual style. "
-        "Only change the requested attributes: product positions, Sponsored tags, Overall Pick tag, Only X Remaining tag, prices, and sizes. "
+        "Only change the requested attributes: product positions, promotion labels, prices, and sizes. "
+        "Do not add Sponsored, Overall Pick, scarcity, ranking, recommendation, or search-result tags. "
         "Keep it as a coherent shelf photograph and change only what is needed to match those instructions."
     )
 
@@ -123,13 +288,24 @@ def build_sampled_payloads(args: argparse.Namespace) -> list[dict[str, Any]]:
         base_payload = load_request(args.base_request_file)
         base_payloads = base_payload if isinstance(base_payload, list) else [base_payload]
         return [build_edit_payload(args.input_image, payload, seed=args.seed) for payload in base_payloads]
-    samples = sample_products(
-        categories=parse_categories(args.categories),
-        sample_size=args.sample_size,
-        sample_count=args.sample_count,
-        catalog_file=args.catalog_file,
-        seed=args.seed,
-    )
+    categories = parse_categories(args.categories)
+    if args.product_image_dir and args.product_image_dir.exists() and not args.allow_missing_product_images:
+        samples = sample_products_with_product_images(
+            categories=categories,
+            sample_size=args.sample_size,
+            sample_count=args.sample_count,
+            catalog_file=args.catalog_file,
+            product_image_dir=args.product_image_dir,
+            seed=args.seed,
+        )
+    else:
+        samples = sample_products(
+            categories=categories,
+            sample_size=args.sample_size,
+            sample_count=args.sample_count,
+            catalog_file=args.catalog_file,
+            seed=args.seed,
+        )
     payloads = [build_generate_payload(sample, seed=args.seed) for sample in samples]
     if args.mode == "generate":
         return payloads
@@ -154,22 +330,102 @@ def save_request_payloads(path: Path, payloads: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def product_reference_thumbnail_path(output_file: Path) -> Path:
+    return output_file.with_name(f"{output_file.stem}_product_refs.png")
+
+
+def render_product_reference_thumbnail(
+    payload: dict[str, Any],
+    output_file: Path,
+    cell_size: tuple[int, int] = (240, 240),
+    label_height: int = 54,
+) -> Path | None:
+    items = [item for item in payload.get("skus", []) if item.get("product_image")]
+    if not items:
+        return None
+
+    from PIL import Image, ImageDraw, ImageOps
+
+    rows = int(payload.get("layout", {}).get("rows", 2))
+    cols = int(payload.get("layout", {}).get("cols", 4))
+    cell_w, cell_h = cell_size
+    margin = 18
+    gap = 14
+    title_h = 38
+    canvas_w = cols * cell_w + (cols - 1) * gap + 2 * margin
+    canvas_h = rows * (cell_h + label_height) + (rows - 1) * gap + 2 * margin + title_h
+    canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
+    draw = ImageDraw.Draw(canvas)
+    title = f'{payload.get("mode", "request")} | {payload.get("category", "category")} | product references'
+    draw.text((margin, margin), title, fill=(20, 20, 20))
+
+    for item in items:
+        position = item.get("position", {})
+        row = int(position.get("row", 1))
+        col = int(position.get("col", 1))
+        x = margin + (col - 1) * (cell_w + gap)
+        y = margin + title_h + (row - 1) * (cell_h + label_height + gap)
+        draw.rectangle((x, y, x + cell_w - 1, y + cell_h + label_height - 1), outline=(210, 210, 210), width=1)
+
+        image_path = Path(item["product_image"])
+        with Image.open(image_path) as image:
+            product = ImageOps.contain(image.convert("RGBA"), (cell_w - 20, cell_h - 20))
+        bg = Image.new("RGBA", (cell_w - 20, cell_h - 20), (255, 255, 255, 255))
+        px = x + 10 + ((cell_w - 20) - product.width) // 2
+        py = y + 10 + ((cell_h - 20) - product.height) // 2
+        canvas.paste(bg.convert("RGB"), (x + 10, y + 10))
+        canvas.paste(product.convert("RGB"), (px, py), product)
+
+        promo = item.get("promotion", "none")
+        label_lines = [
+            f'{item["sku_id"]} | {item.get("price", "unknown")} | {item.get("size", "unknown")}',
+            promo if promo != "none" else "",
+        ]
+        label_y = y + cell_h + 6
+        for line in label_lines:
+            if line:
+                draw.text((x + 8, label_y), line[:38], fill=(30, 30, 30))
+            label_y += 18
+
+    thumbnail_file = product_reference_thumbnail_path(output_file)
+    thumbnail_file.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(thumbnail_file)
+    return thumbnail_file
+
+
+def product_image_content_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    parts = []
+    for item in payload["skus"]:
+        image_path = item.get("product_image")
+        if not image_path:
+            continue
+        path = Path(image_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Product reference image not found for SKU {item['sku_id']}: {path}")
+        parts.append({"type": "image_url", "image_url": {"url": encode_local_image(path)}})
+    return parts
+
+
 def build_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     mode = payload["mode"]
     if mode == "generate":
-        return [{"role": "user", "content": build_generate_prompt(payload)}]
+        content: list[dict[str, Any]] = [{"type": "text", "text": build_generate_prompt(payload)}]
+        content.extend(product_image_content_parts(payload))
+        return [{"role": "user", "content": content}]
 
     if mode == "edit":
         input_image_path = Path(payload["input_image"])
         if not input_image_path.exists():
             raise FileNotFoundError(f"Input image not found for edit mode: {input_image_path}")
+        content = [
+            {"type": "text", "text": build_edit_prompt(payload)},
+            {"type": "image_url", "image_url": {"url": encode_local_image(input_image_path)}},
+        ]
+        content.extend(product_image_content_parts(payload))
         return [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": build_edit_prompt(payload)},
-                    {"type": "image_url", "image_url": {"url": encode_local_image(input_image_path)}},
-                ],
+                "content": content,
             }
         ]
 
@@ -213,7 +469,10 @@ def extract_image_bytes(result: dict[str, Any]) -> bytes:
     message = result["choices"][0]["message"]
     images = message.get("images") or []
     if not images:
-        raise ValueError("No generated image found in OpenRouter response.")
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = json.dumps(content, ensure_ascii=False)
+        raise ValueError(f"No generated image found in OpenRouter response. Message content: {content[:1000]}")
     image_url = images[0]["image_url"]["url"]
     if not image_url.startswith("data:image"):
         raise ValueError("Expected a base64 image data URL in the response.")
@@ -227,6 +486,16 @@ def main() -> None:
     else:
         payloads = build_sampled_payloads(args)
 
+    if args.product_image_dir:
+        payloads = [
+            attach_product_images_to_payload(
+                payload=payload,
+                product_image_dir=args.product_image_dir,
+                allow_missing=args.allow_missing_product_images,
+            )
+            for payload in payloads
+        ]
+
     if args.request_output_file:
         save_request_payloads(args.request_output_file, payloads)
 
@@ -238,7 +507,12 @@ def main() -> None:
         raise RuntimeError("OPENROUTER_API_KEY is not set.")
 
     outputs = []
+    reference_thumbnails = []
     for index, payload in enumerate(payloads):
+        output_file = resolve_output_file(args, payload, index, len(payloads))
+        thumbnail_file = render_product_reference_thumbnail(payload, output_file)
+        if thumbnail_file:
+            reference_thumbnails.append(str(thumbnail_file))
         messages = build_messages(payload)
         result = call_openrouter(
             api_key=api_key,
@@ -249,7 +523,6 @@ def main() -> None:
             timeout_seconds=args.timeout_seconds,
         )
         image_bytes = extract_image_bytes(result)
-        output_file = resolve_output_file(args, payload, index, len(payloads))
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(image_bytes)
         outputs.append(str(output_file))
@@ -259,6 +532,7 @@ def main() -> None:
             {
                 "model": args.model,
                 "outputs": outputs,
+                "reference_thumbnails": reference_thumbnails,
                 "request_file": str(args.request_file) if args.request_file else None,
                 "request_output_file": str(args.request_output_file) if args.request_output_file else None,
             },

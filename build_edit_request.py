@@ -23,8 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-size", type=int, default=8)
     parser.add_argument("--sample-count", type=int, default=1)
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--sponsored-count", type=int, choices=[1, 2, 3, 4])
-    parser.add_argument("--scarcity-remaining", type=int, choices=[1, 2, 3, 4, 5])
+    parser.add_argument("--promotion-count", type=int, choices=[1, 2, 3, 4])
     return parser.parse_args()
 
 
@@ -38,8 +37,7 @@ def main() -> None:
                 input_image=args.input_image,
                 base_payload=payload,
                 seed=args.seed,
-                sponsored_count=args.sponsored_count,
-                scarcity_remaining=args.scarcity_remaining,
+                promotion_count=args.promotion_count,
             )
             for payload in base_payloads
         ]
@@ -56,8 +54,7 @@ def main() -> None:
                 input_image=args.input_image,
                 base_payload=build_generate_payload(sample, seed=args.seed),
                 seed=args.seed,
-                sponsored_count=args.sponsored_count,
-                scarcity_remaining=args.scarcity_remaining,
+                promotion_count=args.promotion_count,
             )
             for sample in samples
         ]

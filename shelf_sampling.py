@@ -134,7 +134,6 @@ def product_to_sku(row: dict[str, Any], position: dict[str, int], rng: random.Ra
         "base_price": format_price(base_price),
         "price": format_price(base_price),
         "promotion": "none",
-        "tags": [],
         "size": infer_size(row, rng),
         "position": position,
         "source_row": row,
@@ -166,6 +165,7 @@ def perturb_edit_attributes(
     seed: int | None = None,
     sponsored_count: int | None = None,
     scarcity_remaining: int | None = None,
+    promotion_count: int | None = None,
 ) -> list[dict[str, Any]]:
     rng = random.Random(seed)
     edited = [dict(item) for item in skus]
@@ -174,29 +174,19 @@ def perturb_edit_attributes(
     rng.shuffle(shuffled_positions)
     for item, position in zip(edited, shuffled_positions, strict=True):
         item["position"] = position
-        item["tags"] = []
+        item.pop("tags", None)
         base_price = as_float(str(item.get("base_price", item.get("price", "3.99"))).replace("$", "")) or 3.99
         item["price"] = format_price(base_price * rng.lognormvariate(0, 0.3))
         item["size"] = item.get("size") or infer_size(item.get("source_row", {}), rng)
         item["promotion"] = "none"
 
-    sponsored_n = sponsored_count if sponsored_count is not None else rng.randint(1, 4)
-    sponsored_indices = set(rng.sample(range(len(edited)), sponsored_n))
-    for index in sponsored_indices:
-        edited[index]["tags"].append("Sponsored")
-
-    eligible_overall = [i for i in range(len(edited)) if i not in sponsored_indices]
-    overall_index = rng.choice(eligible_overall)
-    edited[overall_index]["tags"].append("Overall Pick")
-
-    eligible_scarcity = [i for i in eligible_overall if i != overall_index]
-    scarcity_index = rng.choice(eligible_scarcity)
-    remaining = scarcity_remaining if scarcity_remaining is not None else rng.randint(1, 5)
-    edited[scarcity_index]["tags"].append(f"Only {remaining} Remaining")
-
-    for item in edited:
-        if item["tags"]:
-            item["promotion"] = ", ".join(item["tags"])
+    # Keep the old arguments for call-site compatibility, but edit mode now uses
+    # only generic promotion markers instead of sponsored/search tags.
+    _ = sponsored_count, scarcity_remaining
+    promotion_n = promotion_count if promotion_count is not None else rng.randint(1, 4)
+    promotion_indices = set(rng.sample(range(len(edited)), promotion_n))
+    for index in promotion_indices:
+        edited[index]["promotion"] = "Promotion"
     return edited
 
 
@@ -206,6 +196,7 @@ def build_edit_payload(
     seed: int | None = None,
     sponsored_count: int | None = None,
     scarcity_remaining: int | None = None,
+    promotion_count: int | None = None,
 ) -> dict[str, Any]:
     return {
         **base_payload,
@@ -213,13 +204,14 @@ def build_edit_payload(
         "input_image": str(input_image),
         "notes": (
             "Keep the original shelf, camera angle, lighting, product identities, and background unchanged. "
-            "Only modify these attributes: positions, Sponsored tags, Overall Pick tag, Only X Remaining tag, prices, and sizes."
+            "Only modify these attributes: positions, promotion labels, prices, and sizes."
         ),
         "skus": perturb_edit_attributes(
             base_payload["skus"],
             seed=seed,
             sponsored_count=sponsored_count,
             scarcity_remaining=scarcity_remaining,
+            promotion_count=promotion_count,
         ),
     }
 
