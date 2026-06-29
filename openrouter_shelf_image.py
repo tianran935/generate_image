@@ -219,12 +219,29 @@ def format_product_reference_lines(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def package_size_scale(size: Any) -> float:
+    match = re.search(r"(\d+(?:\.\d+)?)", str(size or ""))
+    if not match:
+        return 1.0
+    amount = float(match.group(1))
+    if "ct" in str(size).lower() or "count" in str(size).lower():
+        baseline = 18.0
+    elif "l" in str(size).lower() and "fl" not in str(size).lower():
+        baseline = 1.0
+    else:
+        baseline = 10.0
+    return max(0.72, min(1.18, (amount / baseline) ** 0.25))
+
+
 def product_realism_instructions() -> str:
     return (
         "All listed SKUs are real retail products. When product reference images are provided, use those images as the "
         "primary source of truth for package identity, brand, colors, logos, shape, and front-panel artwork. Do not invent, "
         "replace, redraw from memory, or hallucinate different packaging. Some item names are abbreviated POS descriptions; "
         "use the reference images to resolve the true original product packaging rather than generic placeholder packaging. "
+        "A 2x4 product reference sheet is provided before the individual product images; treat that sheet as the layout and "
+        "relative package-size guide. Copy the visible package silhouette, aspect ratio, color blocking, and front-facing "
+        "artwork from the references as closely as the image model allows. "
         "The visible package format and apparent package size must match the provided size field: for example, small bags, "
         "family-size bags, boxes, bottles, cans, jars, tubs, pints, and multi-packs should look physically consistent with "
         "their stated ounces, fluid ounces, liters, counts, or quarts. "
@@ -246,15 +263,16 @@ def build_generate_prompt(payload: dict[str, Any]) -> str:
         f"{format_product_reference_lines(payload['skus'])}\n"
         f"{product_realism_instructions()}"
         "Use ONLY the provided product reference images for the eight focal products. "
-        "You may adjust perspective, scale, lighting, shadows, and shelf integration so the final scene is realistic, "
-        "but preserve the product package appearance from each reference image. "
+        "Do not redesign packages, substitute flavors, simplify logos, or change package colors. "
+        "You may adjust perspective, lighting, shadows, and shelf integration so the final scene is realistic, "
+        "but preserve the product package appearance and relative package sizes from the reference sheet and individual images. "
         "Use a strict 2 by 4 layout: two horizontal shelf rows and four product columns, for exactly eight focal products. "
         "Render a realistic grocery shelf photograph that matches a real supermarket shelf. "
         "The shelf should be densely stocked and visually full, with products filling almost all visible facing space. "
         "Avoid large empty gaps or obviously sparse experimental layouts unless a gap is explicitly requested. "
         "Use repeated facings and neighboring filler products from the same category when needed so the shelf looks naturally merchandised. "
         "Keep the requested target SKUs at their specified positions and preserve their item identity, price cue, and promotion type. "
-        "Make price tags and promotion markers visible and believable. "
+        "Make price labels and promotion markers visible and believable. "
         "The final image should look like a real fully merchandised cereal shelf in a supermarket rather than a minimal mockup."
     )
 
@@ -273,8 +291,8 @@ def build_edit_prompt(payload: dict[str, Any]) -> str:
         f"{product_realism_instructions()}"
         "Use the product reference images as the exact package sources for the eight focal products. "
         "Do not change product identities, shelf framing, background, lighting, camera angle, or visual style. "
-        "Only change the requested attributes: product positions, promotion labels, prices, and sizes. "
-        "Do not add Sponsored, Overall Pick, scarcity, ranking, recommendation, or search-result tags. "
+        "Only change the requested attributes represented in the structured configuration: product positions, promotion labels, prices, and sizes. "
+        "Do not change package designs, product identities, or any unrequested visual attributes. "
         "Keep it as a coherent shelf photograph and change only what is needed to match those instructions."
     )
 
@@ -369,7 +387,10 @@ def render_product_reference_thumbnail(
 
         image_path = Path(item["product_image"])
         with Image.open(image_path) as image:
-            product = ImageOps.contain(image.convert("RGBA"), (cell_w - 20, cell_h - 20))
+            scale = package_size_scale(item.get("size"))
+            max_w = int((cell_w - 20) * scale)
+            max_h = int((cell_h - 20) * scale)
+            product = ImageOps.contain(image.convert("RGBA"), (max_w, max_h))
         bg = Image.new("RGBA", (cell_w - 20, cell_h - 20), (255, 255, 255, 255))
         px = x + 10 + ((cell_w - 20) - product.width) // 2
         py = y + 10 + ((cell_h - 20) - product.height) // 2
@@ -406,10 +427,23 @@ def product_image_content_parts(payload: dict[str, Any]) -> list[dict[str, Any]]
     return parts
 
 
+def product_reference_sheet_content_part(payload: dict[str, Any]) -> dict[str, Any] | None:
+    sheet_path = payload.get("product_reference_sheet")
+    if not sheet_path:
+        return None
+    path = Path(sheet_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Product reference sheet not found: {path}")
+    return {"type": "image_url", "image_url": {"url": encode_local_image(path)}}
+
+
 def build_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     mode = payload["mode"]
     if mode == "generate":
         content: list[dict[str, Any]] = [{"type": "text", "text": build_generate_prompt(payload)}]
+        sheet_part = product_reference_sheet_content_part(payload)
+        if sheet_part:
+            content.append(sheet_part)
         content.extend(product_image_content_parts(payload))
         return [{"role": "user", "content": content}]
 
@@ -421,6 +455,9 @@ def build_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
             {"type": "text", "text": build_edit_prompt(payload)},
             {"type": "image_url", "image_url": {"url": encode_local_image(input_image_path)}},
         ]
+        sheet_part = product_reference_sheet_content_part(payload)
+        if sheet_part:
+            content.append(sheet_part)
         content.extend(product_image_content_parts(payload))
         return [
             {
@@ -496,9 +533,6 @@ def main() -> None:
             for payload in payloads
         ]
 
-    if args.request_output_file:
-        save_request_payloads(args.request_output_file, payloads)
-
     if not args.output_file and not args.output_dir:
         raise ValueError("--output-file or --output-dir is required.")
 
@@ -512,7 +546,14 @@ def main() -> None:
         output_file = resolve_output_file(args, payload, index, len(payloads))
         thumbnail_file = render_product_reference_thumbnail(payload, output_file)
         if thumbnail_file:
+            payload["product_reference_sheet"] = str(thumbnail_file)
             reference_thumbnails.append(str(thumbnail_file))
+
+    if args.request_output_file:
+        save_request_payloads(args.request_output_file, payloads)
+
+    for index, payload in enumerate(payloads):
+        output_file = resolve_output_file(args, payload, index, len(payloads))
         messages = build_messages(payload)
         result = call_openrouter(
             api_key=api_key,

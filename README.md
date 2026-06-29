@@ -60,7 +60,7 @@ python shelf_sampling.py \
 
 提示词会要求模型把商品参考图作为包装身份、品牌、颜色、logo、形状和正面 artwork 的主要依据。即使商品名是 POS 缩写，也应根据参考图还原真实商品包装，而不是生成泛化或虚构包装。同时包装形态和视觉大小需要与 `size` 字段一致，例如袋装重量、饮料容量、盒装规格、罐/瓶/杯/桶/多包装数量等。
 
-每次调用图片模型前，程序会用 PIL 自动生成一张 2x4 商品参考缩略图，保存在输出图片旁边。例如 `output/shelf.png` 会对应生成 `output/shelf_product_refs.png`，用于检查本次抽样的 8 张商品图、价格、规格和标签。
+每次调用图片模型前，程序会用 PIL 自动生成一张 2x4 商品参考缩略图，保存在输出图片旁边。例如 `output/shelf.png` 会对应生成 `output/shelf_product_refs.png`，用于检查本次抽样的 8 张商品图、价格和规格。这张 2x4 参考图也会作为额外输入传给图片模型，作为商品位置和相对包装大小的 layout guide。
 
 ```bash
 python openrouter_shelf_image.py \
@@ -93,14 +93,12 @@ python test_generate_image_mode.py
 
 改图 attribute 随机生成逻辑：
 
-- Position：随机打乱 8 个商品位置。
-- Promotion：随机给 `X` 个商品加入促销标识，`X ~ Unif({1,2,3,4})`。不再使用 Sponsored、Overall Pick、Only X Remaining 等标签。
 - Price：`p'_j = p_j * f_j`，`f_j ~ logNormal(mu=0, sigma=0.3)`。
-- Size：按具体品类生成，例如 chips 为常见重量，饮料为容量，coffee/cereal/ice cream/yogurt/crackers/dips 等有各自常见规格。
 
-改图提示词同样要求所有商品保持真实商品身份，并让修改后的包装大小和 `size` 字段对齐。
+改图模式下，生图和改图之间只有 `price` 不同。SKU、位置、促销、size、商品参考图和包装外观都保持不变。
+改图提示词同样要求所有商品保持真实商品身份，并让包装大小和 `size` 字段对齐。
 改图时会同时输入原货架图和 8 张商品参考图：原货架图用于保持整体货架环境，商品参考图用于约束每个 SKU 的真实包装，不允许模型换成自编商品。
-改图也会生成对应的 2x4 商品参考缩略图，按改图后的随机位置排列。
+改图也会生成对应的 2x4 商品参考缩略图，按同一位置排列，仅价格发生变化。
 
 先构造改图请求：
 

@@ -163,8 +163,6 @@ def build_generate_payload(sample: dict[str, Any], seed: int | None = None) -> d
 def perturb_edit_attributes(
     skus: list[dict[str, Any]],
     seed: int | None = None,
-    sponsored_count: int | None = None,
-    scarcity_remaining: int | None = None,
     promotion_count: int | None = None,
 ) -> list[dict[str, Any]]:
     rng = random.Random(seed)
@@ -180,9 +178,6 @@ def perturb_edit_attributes(
         item["size"] = item.get("size") or infer_size(item.get("source_row", {}), rng)
         item["promotion"] = "none"
 
-    # Keep the old arguments for call-site compatibility, but edit mode now uses
-    # only generic promotion markers instead of sponsored/search tags.
-    _ = sponsored_count, scarcity_remaining
     promotion_n = promotion_count if promotion_count is not None else rng.randint(1, 4)
     promotion_indices = set(rng.sample(range(len(edited)), promotion_n))
     for index in promotion_indices:
@@ -194,8 +189,6 @@ def build_edit_payload(
     input_image: Path,
     base_payload: dict[str, Any],
     seed: int | None = None,
-    sponsored_count: int | None = None,
-    scarcity_remaining: int | None = None,
     promotion_count: int | None = None,
 ) -> dict[str, Any]:
     return {
@@ -209,8 +202,6 @@ def build_edit_payload(
         "skus": perturb_edit_attributes(
             base_payload["skus"],
             seed=seed,
-            sponsored_count=sponsored_count,
-            scarcity_remaining=scarcity_remaining,
             promotion_count=promotion_count,
         ),
     }
