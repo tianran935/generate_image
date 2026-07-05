@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,7 @@ def image_rank(path: Path) -> int | None:
 def list_product_images(product_image_dir: Path) -> list[Path]:
     if not product_image_dir.exists():
         return []
-    images = [p for p in product_image_dir.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES]
+    images = [p for p in product_image_dir.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES]
     return sorted(images, key=lambda p: (image_rank(p) or 9999, IMAGE_SUFFIX_PRIORITY.get(p.suffix.lower(), 99), p.name))
 
 
@@ -94,16 +95,6 @@ def find_product_image(item: dict[str, Any], product_images: list[Path]) -> Path
             digits = image_digits(path).lstrip("0")
             if digits.startswith(sku_id):
                 return path.resolve()
-
-    source = item.get("source_row", item)
-    rank = source.get("rank_within_category") if isinstance(source, dict) else None
-    try:
-        rank_int = int(float(rank))
-    except (TypeError, ValueError):
-        return None
-    for path in product_images:
-        if image_rank(path) == rank_int:
-            return path.resolve()
     return None
 
 
@@ -337,9 +328,10 @@ def resolve_output_file(args: argparse.Namespace, payload: dict[str, Any], index
         return args.output_file
     output_dir = args.output_dir or (args.output_file.parent if args.output_file else Path("output"))
     category = str(payload.get("category", "shelf")).lower().replace(" ", "_").replace("/", "_")
-    mode = payload["mode"]
+    mode = {"generate": "生图", "edit": "改图"}.get(payload["mode"], payload["mode"])
     sample_index = payload.get("sample_index", index)
-    return output_dir / f"{mode}_{category}_sample_{sample_index}.png"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return output_dir / f"{timestamp}_{mode}_{category}_sample_{sample_index}.png"
 
 
 def save_request_payloads(path: Path, payloads: list[dict[str, Any]]) -> None:
@@ -349,7 +341,7 @@ def save_request_payloads(path: Path, payloads: list[dict[str, Any]]) -> None:
 
 
 def product_reference_thumbnail_path(output_file: Path) -> Path:
-    return output_file.with_name(f"{output_file.stem}_product_refs.png")
+    return output_file.with_name(f"{output_file.stem}_商品参考.png")
 
 
 def render_product_reference_thumbnail(
@@ -540,10 +532,11 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not set.")
 
+    output_files = [resolve_output_file(args, payload, index, len(payloads)) for index, payload in enumerate(payloads)]
+
     outputs = []
     reference_thumbnails = []
-    for index, payload in enumerate(payloads):
-        output_file = resolve_output_file(args, payload, index, len(payloads))
+    for payload, output_file in zip(payloads, output_files, strict=True):
         thumbnail_file = render_product_reference_thumbnail(payload, output_file)
         if thumbnail_file:
             payload["product_reference_sheet"] = str(thumbnail_file)
@@ -552,8 +545,7 @@ def main() -> None:
     if args.request_output_file:
         save_request_payloads(args.request_output_file, payloads)
 
-    for index, payload in enumerate(payloads):
-        output_file = resolve_output_file(args, payload, index, len(payloads))
+    for payload, output_file in zip(payloads, output_files, strict=True):
         messages = build_messages(payload)
         result = call_openrouter(
             api_key=api_key,

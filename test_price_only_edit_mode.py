@@ -6,16 +6,18 @@ import os
 import random
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
-GENERATE_REQUEST = ROOT / "output" / "price_only_generate_request.json"
-GENERATE_IMAGE = ROOT / "output" / "price_only_generate.png"
-EDIT_SOURCE_REQUEST = ROOT / "output" / "price_only_edit_source_request.json"
-EDIT_REQUEST = ROOT / "output" / "price_only_edit_request.json"
-EDIT_IMAGE = ROOT / "output" / "price_only_edit.png"
+RUN_PREFIX = datetime.now().strftime("%Y%m%d_%H%M%S")
+GENERATE_REQUEST = ROOT / "output" / f"{RUN_PREFIX}_生图_price_only_请求.json"
+GENERATE_IMAGE = ROOT / "output" / f"{RUN_PREFIX}_生图_price_only.png"
+EDIT_SOURCE_REQUEST = ROOT / "output" / f"{RUN_PREFIX}_改图_price_only_源请求.json"
+EDIT_REQUEST = ROOT / "output" / f"{RUN_PREFIX}_改图_price_only_请求.json"
+EDIT_IMAGE = ROOT / "output" / f"{RUN_PREFIX}_改图_price_only.png"
 
 
 def as_float(value: Any) -> float | None:

@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-REQUEST_FILE = ROOT / "output" / "test_generate_request.json"
-IMAGE_FILE = ROOT / "output" / "test_generate_shelf.png"
+RUN_PREFIX = datetime.now().strftime("%Y%m%d_%H%M%S")
+REQUEST_FILE = ROOT / "output" / f"{RUN_PREFIX}_生图_test_generate_请求.json"
+IMAGE_FILE = ROOT / "output" / f"{RUN_PREFIX}_生图_test_generate.png"
 
 
 def main() -> None:

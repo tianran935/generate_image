@@ -2,6 +2,22 @@
 
 这个工作区专门用于纯 LLM 货架图工作流。
 
+## 目录速查
+
+- `openrouter_shelf_image.py`：主入口；负责生图、改图、商品参考图拼接、OpenRouter 调用。
+- `shelf_sampling.py`：从 SKU 表中按品类抽样，并构造基础货架 payload。
+- `build_edit_request.py`：根据已有货架图和基础请求构造改图请求。
+- `test_generate_image_mode.py`：真实调用 OpenRouter 的生图验证脚本。
+- `test_price_only_edit_mode.py`：真实调用 OpenRouter 的 price-only 改图验证脚本。
+- `output/`：生成结果目录；已按日期和 `生图` / `改图` 命名。
+
+`output/` 文件命名约定：
+
+- 主图：`YYYYMMDD_HHMMSS_生图_场景名.png` 或 `YYYYMMDD_HHMMSS_改图_场景名.png`
+- 商品参考图：`YYYYMMDD_HHMMSS_生图_场景名_商品参考.png`
+- 请求文件：`YYYYMMDD_HHMMSS_生图_场景名_请求.json`
+- 改图源请求：`YYYYMMDD_HHMMSS_改图_场景名_源请求.json`
+
 当前主脚本：
 
 - `openrouter_shelf_image.py`
@@ -60,7 +76,7 @@ python shelf_sampling.py \
 
 提示词会要求模型把商品参考图作为包装身份、品牌、颜色、logo、形状和正面 artwork 的主要依据。即使商品名是 POS 缩写，也应根据参考图还原真实商品包装，而不是生成泛化或虚构包装。同时包装形态和视觉大小需要与 `size` 字段一致，例如袋装重量、饮料容量、盒装规格、罐/瓶/杯/桶/多包装数量等。
 
-每次调用图片模型前，程序会用 PIL 自动生成一张 2x4 商品参考缩略图，保存在输出图片旁边。例如 `output/shelf.png` 会对应生成 `output/shelf_product_refs.png`，用于检查本次抽样的 8 张商品图、价格和规格。这张 2x4 参考图也会作为额外输入传给图片模型，作为商品位置和相对包装大小的 layout guide。
+每次调用图片模型前，程序会用 PIL 自动生成一张 2x4 商品参考缩略图，保存在输出图片旁边。例如 `output/shelf.png` 会对应生成 `output/shelf_商品参考.png`，用于检查本次抽样的 8 张商品图、价格和规格。这张 2x4 参考图也会作为额外输入传给图片模型，作为商品位置和相对包装大小的 layout guide。
 
 ```bash
 python openrouter_shelf_image.py \
