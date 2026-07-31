@@ -39,6 +39,8 @@
 - `item`
 - `price`
 - `promotion`
+- `bestseller_badge`：热销标签，候选文案为 `热销` / `BEST SELLER` / `销量冠军` / `今日TOP1`
+- `inventory_remaining`：剩余库存量，用商品数量、空位、前排 facings、纵深排数或堆叠程度等视觉方式体现，不在货架图里额外写库存数字
 - `position`
 - `size`
 
@@ -111,10 +113,10 @@ python test_generate_image_mode.py
 
 - Price：`p'_j = p_j * f_j`，`f_j ~ logNormal(mu=0, sigma=0.3)`。
 
-改图模式下，生图和改图之间只有 `price` 不同。SKU、位置、促销、size、商品参考图和包装外观都保持不变。
+改图模式下，默认会随机改变位置、价格、促销、热销标签和库存量；SKU、商品参考图、包装外观和已有 size 字段保持不变。若需要做单变量验证，应使用对应测试脚本或构造专门请求。
 改图提示词同样要求所有商品保持真实商品身份，并让包装大小和 `size` 字段对齐。
 改图时会同时输入原货架图和 8 张商品参考图：原货架图用于保持整体货架环境，商品参考图用于约束每个 SKU 的真实包装，不允许模型换成自编商品。
-改图也会生成对应的 2x4 商品参考缩略图，按同一位置排列，仅价格发生变化。
+改图也会生成对应的 2x4 商品参考缩略图，按同一位置排列，并显示价格、促销和热销标签。
 
 先构造改图请求：
 
@@ -122,6 +124,7 @@ python test_generate_image_mode.py
 python build_edit_request.py \
   --input-image output/shelf.png \
   --category "TORTILLA CHIPS" \
+  --bestseller-count 2 \
   --output-file output/edit_request.json
 ```
 

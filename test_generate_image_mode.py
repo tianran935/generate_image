@@ -46,6 +46,7 @@ def main() -> None:
     assert len(request["skus"]) == 8
     assert {sku["position"]["row"] for sku in request["skus"]} == {1, 2}
     assert {sku["position"]["col"] for sku in request["skus"]} == {1, 2, 3, 4}
+    assert {sku["bestseller_badge"] for sku in request["skus"]} == {"none"}
 
     assert IMAGE_FILE.exists() and IMAGE_FILE.stat().st_size > 0
 

@@ -12,6 +12,8 @@ from typing import Any
 DEFAULT_CATALOG_FILE = Path(__file__).resolve().parents[1] / "data_clean" / "top_50_skus_selected_categories.csv"
 GRID_ROWS = 2
 GRID_COLS = 4
+BESTSELLER_BADGE_LABELS = ["热销", "BEST SELLER", "销量冠军", "今日TOP1"]
+INVENTORY_REMAINING_LEVELS = [1, 2, 3, 4, 6, 8, 10, 12]
 
 
 def load_catalog(catalog_file: Path = DEFAULT_CATALOG_FILE) -> list[dict[str, Any]]:
@@ -134,6 +136,8 @@ def product_to_sku(row: dict[str, Any], position: dict[str, int], rng: random.Ra
         "base_price": format_price(base_price),
         "price": format_price(base_price),
         "promotion": "none",
+        "bestseller_badge": "none",
+        "inventory_remaining": 8,
         "size": infer_size(row, rng),
         "position": position,
         "source_row": row,
@@ -146,11 +150,16 @@ def build_generate_payload(sample: dict[str, Any], seed: int | None = None) -> d
         product_to_sku(row, position, rng)
         for row, position in zip(sample["items"], positions_2x4(), strict=True)
     ]
+    inventory_levels = INVENTORY_REMAINING_LEVELS[: len(skus)]
+    rng.shuffle(inventory_levels)
+    for sku, inventory_remaining in zip(skus, inventory_levels, strict=True):
+        sku["inventory_remaining"] = inventory_remaining
     return {
         "mode": "generate",
         "category": sample["category"],
         "layout": {"rows": GRID_ROWS, "cols": GRID_COLS},
         "sample_index": sample["sample_index"],
+        "inventory_visual_strategy": "front_facings",
         "style": "realistic 2 by 4 grocery shelf experiment image",
         "notes": (
             "Create exactly eight focal products arranged in a two-row by four-column shelf grid. "
@@ -164,6 +173,7 @@ def perturb_edit_attributes(
     skus: list[dict[str, Any]],
     seed: int | None = None,
     promotion_count: int | None = None,
+    bestseller_count: int | None = None,
 ) -> list[dict[str, Any]]:
     rng = random.Random(seed)
     edited = [dict(item) for item in skus]
@@ -177,11 +187,18 @@ def perturb_edit_attributes(
         item["price"] = format_price(base_price * rng.lognormvariate(0, 0.3))
         item["size"] = item.get("size") or infer_size(item.get("source_row", {}), rng)
         item["promotion"] = "none"
+        item["bestseller_badge"] = "none"
+        item["inventory_remaining"] = rng.choice(INVENTORY_REMAINING_LEVELS)
 
     promotion_n = promotion_count if promotion_count is not None else rng.randint(1, 4)
     promotion_indices = set(rng.sample(range(len(edited)), promotion_n))
     for index in promotion_indices:
         edited[index]["promotion"] = "Promotion"
+
+    bestseller_n = bestseller_count if bestseller_count is not None else rng.randint(1, 4)
+    bestseller_indices = rng.sample(range(len(edited)), bestseller_n)
+    for index in bestseller_indices:
+        edited[index]["bestseller_badge"] = rng.choice(BESTSELLER_BADGE_LABELS)
     return edited
 
 
@@ -190,6 +207,7 @@ def build_edit_payload(
     base_payload: dict[str, Any],
     seed: int | None = None,
     promotion_count: int | None = None,
+    bestseller_count: int | None = None,
 ) -> dict[str, Any]:
     return {
         **base_payload,
@@ -197,12 +215,13 @@ def build_edit_payload(
         "input_image": str(input_image),
         "notes": (
             "Keep the original shelf, camera angle, lighting, product identities, and background unchanged. "
-            "Only modify these attributes: positions, promotion labels, prices, and sizes."
+            "Only modify these attributes: positions, promotion labels, bestseller badges, prices, and sizes."
         ),
         "skus": perturb_edit_attributes(
             base_payload["skus"],
             seed=seed,
             promotion_count=promotion_count,
+            bestseller_count=bestseller_count,
         ),
     }
 

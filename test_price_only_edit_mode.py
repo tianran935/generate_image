@@ -72,6 +72,7 @@ def assert_only_prices_changed(generate_request: Path, edit_request: Path) -> No
         "category_name",
         "base_price",
         "promotion",
+        "bestseller_badge",
         "size",
         "position",
         "product_image",

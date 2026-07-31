@@ -13,7 +13,9 @@ from typing import Any
 import requests
 
 from shelf_sampling import (
+    BESTSELLER_BADGE_LABELS,
     DEFAULT_CATALOG_FILE,
+    INVENTORY_REMAINING_LEVELS,
     available_categories,
     build_edit_payload,
     build_generate_payload,
@@ -46,7 +48,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-image", type=Path, help="Original shelf image for edit mode.")
     parser.add_argument("--base-request-file", type=Path, help="Generate request JSON to preserve SKU identities in edit mode.")
     parser.add_argument("--product-image-dir", type=Path, default=DEFAULT_PRODUCT_IMAGE_DIR, help="Directory containing product reference images.")
+    parser.add_argument("--reference-sheet-only", action="store_true", help="Send only the PIL 2x4 product reference sheet, not the eight individual product images.")
     parser.add_argument("--allow-missing-product-images", action="store_true", help="Allow text-only fallback when some SKU images are missing.")
+    parser.add_argument("--bestseller-count", type=int, choices=[1, 2, 3, 4], help="Number of products to receive a bestseller badge in sampled edit mode.")
     parser.add_argument("--request-output-file", type=Path, help="Optional JSON file to save built request payloads.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenRouter image model.")
     parser.add_argument("--aspect-ratio", default="4:3", help="Image aspect ratio.")
@@ -185,14 +189,32 @@ def format_sku_lines(items: list[dict[str, Any]]) -> str:
     lines = []
     for index, item in enumerate(items, start=1):
         promo = item.get("promotion", "none")
+        bestseller_badge = item.get("bestseller_badge", item.get("bestseller", "none"))
+        inventory_remaining = item.get("inventory_remaining", "unknown")
         price = item.get("price", "unknown")
         size = item.get("size", "unknown")
+        brand = item.get("brand")
+        color = item.get("color")
+        rating = item.get("rating")
+        reviews = item.get("number_of_reviews", item.get("reviews"))
+        product_number = item.get("product_number", index)
         source = item.get("source_row", {})
         rank = source.get("rank_within_category", "unknown") if isinstance(source, dict) else "unknown"
         image_note = f", product_reference_image={index}" if item.get("product_image") else ", product_reference_image=missing"
+        optional_fields = []
+        if brand not in (None, ""):
+            optional_fields.append(f'brand="{brand}"')
+        if color not in (None, ""):
+            optional_fields.append(f'color="{color}"')
+        if rating not in (None, ""):
+            optional_fields.append(f'rating="{rating}"')
+        if reviews not in (None, ""):
+            optional_fields.append(f'number_of_reviews="{reviews}"')
+        optional_text = ", " + ", ".join(optional_fields) if optional_fields else ""
         lines.append(
-            f'- {item["sku_id"]}: item="{item["item"]}", size="{size}", price="{price}", '
-            f'promotion="{promo}", category="{item.get("category_name", "unknown")}", source_rank="{rank}", '
+            f'- product_number={product_number}, sku_id={item["sku_id"]}: item="{item["item"]}", size="{size}", price="{price}"{optional_text}, '
+            f'promotion="{promo}", bestseller_badge="{bestseller_badge}", inventory_remaining="{inventory_remaining}", '
+            f'category="{item.get("category_name", "unknown")}", source_rank="{rank}", '
             f'position=(row {item["position"]["row"]}, col {item["position"]["col"]}){image_note}'
         )
     return "\n".join(lines)
@@ -224,18 +246,101 @@ def package_size_scale(size: Any) -> float:
     return max(0.72, min(1.18, (amount / baseline) ** 0.25))
 
 
-def product_realism_instructions() -> str:
+def product_realism_instructions(payload: dict[str, Any]) -> str:
+    if payload.get("synthetic_products"):
+        return (
+            "These are synthetic experiment products. Render simple, believable, non-branded retail packages from the "
+            "structured product titles and attributes. Do not add real logos unless the brand is explicitly listed in the "
+            "structured configuration. "
+        )
     return (
         "All listed SKUs are real retail products. When product reference images are provided, use those images as the "
         "primary source of truth for package identity, brand, colors, logos, shape, and front-panel artwork. Do not invent, "
         "replace, redraw from memory, or hallucinate different packaging. Some item names are abbreviated POS descriptions; "
         "use the reference images to resolve the true original product packaging rather than generic placeholder packaging. "
-        "A 2x4 product reference sheet is provided before the individual product images; treat that sheet as the layout and "
-        "relative package-size guide. Copy the visible package silhouette, aspect ratio, color blocking, and front-facing "
+        "A 2x4 product reference sheet is provided; treat that sheet as the layout and relative package-size guide. "
+        "If individual product images are also provided, use them for high-detail package details. "
+        "Copy the visible package silhouette, aspect ratio, color blocking, and front-facing "
         "artwork from the references as closely as the image model allows. "
         "The visible package format and apparent package size must match the provided size field: for example, small bags, "
         "family-size bags, boxes, bottles, cans, jars, tubs, pints, and multi-packs should look physically consistent with "
         "their stated ounces, fluid ounces, liters, counts, or quarts. "
+    )
+
+
+def reference_input_instructions(payload: dict[str, Any]) -> str:
+    if not any(item.get("product_image") for item in payload.get("skus", [])):
+        return (
+            "No product reference images are provided for this request. Generate clear generic package visuals from the "
+            "structured fields, and make the experiment labels the most legible part of each product cell. "
+        )
+    if payload.get("reference_sheet_only"):
+        return (
+            "Use the provided 2x4 product reference sheet as the only visual source for the eight focal products. "
+            "Do not expect separate individual product images; each cell in the reference sheet corresponds to the row and column in the requested shelf. "
+            "Copy package identity, colors, silhouette, front-panel artwork, and relative package size from that sheet. "
+        )
+    return (
+        "Use the provided 2x4 product reference sheet as the layout and relative-size guide, and use the eight individual "
+        "product reference images as high-detail package references. "
+    )
+
+
+def bestseller_badge_instructions() -> str:
+    labels = ", ".join(BESTSELLER_BADGE_LABELS)
+    return (
+        "The bestseller_badge field is a separate merchandising badge, not a price promotion. "
+        f"When bestseller_badge is not 'none', render a clear small hot-selling badge near that SKU using exactly one of these texts: {labels}. "
+        "Keep bestseller badges visually distinct from shelf price labels and promotion markers. "
+    )
+
+
+def inventory_visual_instructions(payload: dict[str, Any]) -> str:
+    strategy = payload.get("inventory_visual_strategy", "front_facings")
+    levels = ", ".join(str(level) for level in INVENTORY_REMAINING_LEVELS)
+    base = (
+        "Inventory is a visual experimental variable. Use the inventory_remaining field to control how many physical units "
+        "or facings of that same SKU appear in its shelf cell. Do not render text labels, stock numbers, inventory signs, "
+        "or digital counters for inventory. Show inventory only through visible product quantity, shelf fullness, empty gaps, "
+        "and how far products extend backward on the shelf. "
+        f"The intended inventory scale is {levels}: 1-2 means very low stock with obvious empty space; 3-4 means low stock; "
+        "6-8 means medium stock; 10-12 means high stock, dense and nearly full. "
+    )
+    strategies = {
+        "front_facings": (
+            "Prompt strategy: front-facing facings. Encode inventory mainly by the number of front-facing copies in each cell. "
+            "Low inventory should show only one or two visible front packages and large empty shelf gaps; high inventory should show many repeated front facings filling the cell. "
+        ),
+        "horizontal_facings": (
+            "Prompt strategy: horizontal shelf width. Encode inventory by how much horizontal width the SKU occupies in its cell. "
+            "Low inventory should occupy a narrow slice with visible blank shelf space; high inventory should span almost the full cell with repeated packages side by side. "
+        ),
+        "depth_rows": (
+            "Prompt strategy: depth rows. Encode inventory by rows of the same product receding backward into the shelf. "
+            "Low inventory should have only front items with empty space behind them; high inventory should show several rows deep, with product copies visible behind the front row. "
+        ),
+        "stacked_depth": (
+            "Prompt strategy: stacked and deep stock. Encode inventory by a combination of vertical stacking and depth. "
+            "Low inventory should show a small loose stack or one package; high inventory should show stacked layers and deeper rows while keeping each SKU inside its 2x4 cell. "
+        ),
+        "empty_gap": (
+            "Prompt strategy: empty-gap emphasis. Encode inventory through negative space: low inventory cells have large clean empty slots, exposed shelf surface, and visible back panel; "
+            "high inventory cells are visually full with only tiny gaps. "
+        ),
+    }
+    return base + strategies.get(strategy, strategies["front_facings"])
+
+
+def experiment_label_instructions(payload: dict[str, Any]) -> str:
+    fields = payload.get("experiment_label_fields")
+    if not fields:
+        return ""
+    joined = ", ".join(str(field) for field in fields)
+    return (
+        f"This is a controlled product-choice experiment. In every one of the eight target cells, render large, crisp, "
+        f"front-facing labels for these fields exactly from the structured configuration: {joined}. "
+        "The product number must be visually prominent. Prices, ratings, review counts, brands, and colors are decision-critical "
+        "experimental variables, so they must be readable and must not be omitted, distorted, rounded, or replaced with other values. "
     )
 
 
@@ -252,8 +357,12 @@ def build_generate_prompt(payload: dict[str, Any]) -> str:
         f"{format_sku_lines(payload['skus'])}\n"
         "Product reference mapping:\n"
         f"{format_product_reference_lines(payload['skus'])}\n"
-        f"{product_realism_instructions()}"
-        "Use ONLY the provided product reference images for the eight focal products. "
+        f"{product_realism_instructions(payload)}"
+        f"{reference_input_instructions(payload)}"
+        f"{bestseller_badge_instructions()}"
+        f"{inventory_visual_instructions(payload)}"
+        f"{experiment_label_instructions(payload)}"
+        "Use ONLY the provided product references for the eight focal products when product references are provided. "
         "Do not redesign packages, substitute flavors, simplify logos, or change package colors. "
         "You may adjust perspective, lighting, shadows, and shelf integration so the final scene is realistic, "
         "but preserve the product package appearance and relative package sizes from the reference sheet and individual images. "
@@ -261,10 +370,11 @@ def build_generate_prompt(payload: dict[str, Any]) -> str:
         "Render a realistic grocery shelf photograph that matches a real supermarket shelf. "
         "The shelf should be densely stocked and visually full, with products filling almost all visible facing space. "
         "Avoid large empty gaps or obviously sparse experimental layouts unless a gap is explicitly requested. "
-        "Use repeated facings and neighboring filler products from the same category when needed so the shelf looks naturally merchandised. "
-        "Keep the requested target SKUs at their specified positions and preserve their item identity, price cue, and promotion type. "
-        "Make price labels and promotion markers visible and believable. "
-        "The final image should look like a real fully merchandised cereal shelf in a supermarket rather than a minimal mockup."
+        "Use repeated facings of the requested target SKU when inventory_remaining is high; use visible empty shelf space when inventory_remaining is low. "
+        "Use neighboring filler products only outside the eight target cells when needed so the shelf looks naturally merchandised. "
+        "Keep the requested target SKUs at their specified positions and preserve their item identity, price cue, promotion type, bestseller badge, and experiment labels. "
+        "Make price labels, promotion markers, bestseller badges, and experiment labels visible and believable. "
+        "The final image should look like a real fully merchandised supermarket shelf rather than a minimal mockup."
     )
 
 
@@ -279,10 +389,14 @@ def build_edit_prompt(payload: dict[str, Any]) -> str:
         f"{format_sku_lines(payload['skus'])}\n"
         "Product reference mapping:\n"
         f"{format_product_reference_lines(payload['skus'])}\n"
-        f"{product_realism_instructions()}"
-        "Use the product reference images as the exact package sources for the eight focal products. "
+        f"{product_realism_instructions(payload)}"
+        f"{reference_input_instructions(payload)}"
+        f"{bestseller_badge_instructions()}"
+        f"{inventory_visual_instructions(payload)}"
+        f"{experiment_label_instructions(payload)}"
+        "Use the product references as the exact package sources for the eight focal products. "
         "Do not change product identities, shelf framing, background, lighting, camera angle, or visual style. "
-        "Only change the requested attributes represented in the structured configuration: product positions, promotion labels, prices, and sizes. "
+        "Only change the requested attributes represented in the structured configuration: product positions, promotion labels, bestseller badges, inventory quantities, prices, and sizes. "
         "Do not change package designs, product identities, or any unrequested visual attributes. "
         "Keep it as a coherent shelf photograph and change only what is needed to match those instructions."
     )
@@ -296,7 +410,10 @@ def build_sampled_payloads(args: argparse.Namespace) -> list[dict[str, Any]]:
             raise ValueError("--input-image is required for sampled edit mode.")
         base_payload = load_request(args.base_request_file)
         base_payloads = base_payload if isinstance(base_payload, list) else [base_payload]
-        return [build_edit_payload(args.input_image, payload, seed=args.seed) for payload in base_payloads]
+        return [
+            build_edit_payload(args.input_image, payload, seed=args.seed, bestseller_count=args.bestseller_count)
+            for payload in base_payloads
+        ]
     categories = parse_categories(args.categories)
     if args.product_image_dir and args.product_image_dir.exists() and not args.allow_missing_product_images:
         samples = sample_products_with_product_images(
@@ -320,7 +437,10 @@ def build_sampled_payloads(args: argparse.Namespace) -> list[dict[str, Any]]:
         return payloads
     if not args.input_image:
         raise ValueError("--input-image is required for sampled edit mode.")
-    return [build_edit_payload(args.input_image, payload, seed=args.seed) for payload in payloads]
+    return [
+        build_edit_payload(args.input_image, payload, seed=args.seed, bestseller_count=args.bestseller_count)
+        for payload in payloads
+    ]
 
 
 def resolve_output_file(args: argparse.Namespace, payload: dict[str, Any], index: int, total: int) -> Path:
@@ -348,7 +468,7 @@ def render_product_reference_thumbnail(
     payload: dict[str, Any],
     output_file: Path,
     cell_size: tuple[int, int] = (240, 240),
-    label_height: int = 54,
+    label_height: int = 76,
 ) -> Path | None:
     items = [item for item in payload.get("skus", []) if item.get("product_image")]
     if not items:
@@ -390,9 +510,14 @@ def render_product_reference_thumbnail(
         canvas.paste(product.convert("RGB"), (px, py), product)
 
         promo = item.get("promotion", "none")
+        bestseller_badge = item.get("bestseller_badge", item.get("bestseller", "none"))
         label_lines = [
-            f'{item["sku_id"]} | {item.get("price", "unknown")} | {item.get("size", "unknown")}',
+            f'#{item.get("product_number", "?")} {item["sku_id"]} | {item.get("price", "unknown")}',
+            f'{item.get("brand", "")} {item.get("color", "")}'.strip(),
+            f'rating: {item.get("rating", "")} reviews: {item.get("number_of_reviews", item.get("reviews", ""))}'.strip(),
+            f'size: {item.get("size", "unknown")} inv: {item.get("inventory_remaining", "unknown")}',
             promo if promo != "none" else "",
+            f"badge: {bestseller_badge}" if bestseller_badge != "none" else "",
         ]
         label_y = y + cell_h + 6
         for line in label_lines:
@@ -436,7 +561,8 @@ def build_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
         sheet_part = product_reference_sheet_content_part(payload)
         if sheet_part:
             content.append(sheet_part)
-        content.extend(product_image_content_parts(payload))
+        if not payload.get("reference_sheet_only"):
+            content.extend(product_image_content_parts(payload))
         return [{"role": "user", "content": content}]
 
     if mode == "edit":
@@ -450,7 +576,8 @@ def build_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
         sheet_part = product_reference_sheet_content_part(payload)
         if sheet_part:
             content.append(sheet_part)
-        content.extend(product_image_content_parts(payload))
+        if not payload.get("reference_sheet_only"):
+            content.extend(product_image_content_parts(payload))
         return [
             {
                 "role": "user",
@@ -524,6 +651,9 @@ def main() -> None:
             )
             for payload in payloads
         ]
+
+    for payload in payloads:
+        payload["reference_sheet_only"] = args.reference_sheet_only
 
     if not args.output_file and not args.output_dir:
         raise ValueError("--output-file or --output-dir is required.")

@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-count", type=int, default=1)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--promotion-count", type=int, choices=[1, 2, 3, 4])
+    parser.add_argument("--bestseller-count", type=int, choices=[1, 2, 3, 4])
     return parser.parse_args()
 
 
@@ -38,6 +39,7 @@ def main() -> None:
                 base_payload=payload,
                 seed=args.seed,
                 promotion_count=args.promotion_count,
+                bestseller_count=args.bestseller_count,
             )
             for payload in base_payloads
         ]
@@ -55,6 +57,7 @@ def main() -> None:
                 base_payload=build_generate_payload(sample, seed=args.seed),
                 seed=args.seed,
                 promotion_count=args.promotion_count,
+                bestseller_count=args.bestseller_count,
             )
             for sample in samples
         ]
