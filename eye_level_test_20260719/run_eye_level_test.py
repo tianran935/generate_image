@@ -11,10 +11,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 GENERATE_IMAGE_DIR = ROOT / "generate_image"
+CORE_DIR = GENERATE_IMAGE_DIR / "core"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-PRODUCT_IMAGE_DIR = ROOT / "pic"
+PRODUCT_IMAGE_DIR = ROOT / "pic_reference"
 
-sys.path.insert(0, str(GENERATE_IMAGE_DIR))
+sys.path.insert(0, str(CORE_DIR))
 
 from openrouter_shelf_image import (  # noqa: E402
     attach_product_images_to_payload,
@@ -47,11 +48,9 @@ def build_base_payload() -> dict[str, Any]:
     )
 
     payload["style"] = "realistic complete supermarket shelf photograph"
-    payload["inventory_visual_strategy"] = "front_facings"
     for sku in payload["skus"]:
         sku["promotion"] = "none"
         sku["bestseller_badge"] = "none"
-        sku["inventory_remaining"] = 8
 
     return payload
 
@@ -65,7 +64,7 @@ def condition_payload(base_payload: dict[str, Any], condition: str, eye_level_ro
         "Create a complete supermarket shelf scene, not cropped product cutouts. "
         "Show two clear target shelf rows with four target product columns per row, realistic shelf rails, "
         "price strips, shelf depth, aisle context, and neighboring filler products outside the target 2x4 grid. "
-        "Keep every target SKU, price, promotion state, badge state, size, inventory level, and grid position stable. "
+        "Keep every target SKU, price, promotion state, badge state, size, and grid position stable. "
         f"For this experimental condition, row {eye_level_row} is exactly at a typical adult shopper's eye level and "
         f"row {non_eye_row} is clearly not at eye level. Make the camera height, perspective, and visual salience reflect "
         "that shopper sightline naturally, but do not add any visible text, arrows, labels, or annotations saying eye level. "

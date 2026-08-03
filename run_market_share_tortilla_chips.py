@@ -4,9 +4,9 @@ import runpy
 import sys
 from pathlib import Path
 
-from core.openrouter_shelf_image import *  # noqa: F401,F403
+from experiments.run_market_share_tortilla_chips import *  # noqa: F401,F403
 
-TARGET = Path(__file__).resolve().parent / "core" / "openrouter_shelf_image.py"
+TARGET = Path(__file__).resolve().parent / "experiments" / "run_market_share_tortilla_chips.py"
 
 if __name__ == "__main__":
     sys.path.insert(0, str(TARGET.parent))
