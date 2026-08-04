@@ -432,6 +432,32 @@ def experiment_label_instructions(payload: dict[str, Any]) -> str:
     fields = payload.get("experiment_label_fields")
     if not fields:
         return ""
+    label_spec = payload.get("label_prompt_spec")
+    if isinstance(label_spec, dict):
+        lines = label_spec.get("lines") or []
+        line_texts = []
+        for index, line in enumerate(lines, start=1):
+            if not isinstance(line, dict):
+                continue
+            field = line.get("label", line.get("field"))
+            align = line.get("align", "centered")
+            note = line.get("note")
+            text = f"Line {index} {align}: {field}"
+            if note:
+                text += f" ({note})"
+            line_texts.append(text)
+        forbidden = label_spec.get("forbidden") or []
+        forbidden_text = ", ".join(str(item) for item in forbidden)
+        line_instruction = "; ".join(line_texts)
+        return (
+            "This is a controlled product-choice experiment. For every one of the eight target cells, render exactly one "
+            f"{label_spec.get('material', 'white paper shelf tag')} {label_spec.get('placement', 'directly below each product, centered on the shelf rail')}. "
+            f"The tag must use {label_spec.get('text_color', 'black')} high-contrast horizontal text and a {label_spec.get('layout', 'fixed multiline tag')} layout. "
+            f"Use this exact shelf tag line order from the structured SKU fields: {line_instruction}. "
+            "The item/name line should be centered; the price line must be visually most prominent and keep two decimal places exactly as provided. "
+            "Do not omit, reorder, relabel, round, summarize, translate, or replace any requested field value. "
+            f"Forbidden text or visual content on tags, products, stickers, or anywhere in the image: {forbidden_text}. "
+        )
     joined = ", ".join(str(field) for field in fields)
     field_names = {str(field) for field in fields}
     product_number_instruction = (

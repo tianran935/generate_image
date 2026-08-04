@@ -51,27 +51,55 @@ EXPECTED_POSITIONS = {
     7: {"row": 2, "col": 3},
     8: {"row": 2, "col": 4},
 }
-DESIGN_LABEL_FIELDS = ["price", "category_name", "item", "flavor", "size"]
+DESIGN_LABEL_FIELDS = ["item", "price", "category_name", "flavor", "size"]
+BASELINE_LABEL_PROMPT_SPEC = {
+    "material": "white paper shelf tag",
+    "placement": "directly below each product, centered on the shelf rail",
+    "text_color": "black",
+    "layout": "fixed multiline tag",
+    "lines": [
+        {"field": "item", "label": "item/name", "align": "centered"},
+        {"field": "price", "label": "price", "align": "centered", "note": "two decimals; most visually prominent"},
+        {"field": "category_name", "label": "category_name", "align": "centered"},
+        {"field": "flavor", "label": "flavor", "align": "centered"},
+        {"field": "size", "label": "size", "align": "centered"},
+    ],
+    "forbidden": [
+        "shopper instruction",
+        "task title",
+        "SKU ID",
+        "row/column number",
+        "product_number",
+        "rating/review",
+        "inventory",
+        "promotion/bestseller sticker",
+    ],
+}
+BASELINE_LABEL_FORMAT_TEXT = (
+    "Render one white paper shelf tag directly below each focal product, centered on the shelf rail. "
+    "Use black high-contrast horizontal text in a fixed five-line layout: "
+    "Line 1 centered item/name; Line 2 centered price with exactly two decimals and the most visual emphasis; "
+    "Line 3 centered category_name; Line 4 centered flavor; Line 5 centered size. "
+    "Do not omit, reorder, relabel, round, summarize, translate, or replace these values."
+)
 DESIGN_GENERATE_NOTES = (
     "Create exactly eight focal products arranged in a strict two-row by four-column supermarket shelf grid. "
     "Use the fixed row and column position specified for each SKU in the structured request. "
     "Each target cell must contain exactly one visible focal product unit: no duplicate facings, no stacks, no repeated copies "
     "of the same focal SKU inside a cell, no empty option cells, and no extra focal products. "
     "Do not use empty space, shelf fullness, product quantity, or display depth to express any variable. "
-    "Render one physical supermarket shelf tag directly below each focal product, attached to the shelf rail and centered under that product. "
+    f"{BASELINE_LABEL_FORMAT_TEXT} "
     "The shelf tag must look like a real paper supermarket price tag, not an e-commerce card, web UI, button, table, or floating overlay. "
     "Each tag must stay inside its own cell, must not overlap neighboring tags, and must not cover the product package body. "
-    "Every main shelf tag must show price with two decimals, category name, a short item name when space allows, flavor, and size. "
     "Do not print product_number, option number, #1-#8 markers, row/column numbers, or SKU IDs on the shelf tags or product packages. "
     "Product numbers are internal request and manifest keys only. "
-    "Use high-contrast black horizontal text on a white, light gray, or light yellow tag. "
     "Do not write the shopper instruction, task title, banner, headline, or explanatory text anywhere in the image. "
     "Promotion and bestseller fields are fixed to none in this baseline run, so do not render any promotion sticker, sale sticker, bestseller badge, hot badge, or top-pick marker."
 )
 DESIGN_EDIT_NOTES = (
     "Edit the provided baseline shelf image while preserving the shelf framing, camera angle, lighting, background, package identities, "
     "fixed 2x4 positions, and all non-target attributes. Keep exactly one visible focal product unit in each of the eight cells. "
-    "Keep the physical shelf tags directly below the corresponding products, with two-decimal price, category name, short item name when space allows, flavor, size, high-contrast horizontal text, and no overlapping tags. "
+    f"Keep the physical shelf tags directly below the corresponding products. {BASELINE_LABEL_FORMAT_TEXT} "
     "Do not print product_number, option number, #1-#8 markers, row/column numbers, or SKU IDs on the shelf tags or product packages. "
     "Change only the structured target values needed for this scenario, especially the shelf price labels. "
     "Prices must remain two-decimal values and must be readable, including 1 percent price-difference scenarios. "
@@ -195,6 +223,7 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized["experiment"] = normalized["task_family"]
     normalized["baseline_family"] = baseline_family(normalized["subtest"])
     normalized["experiment_label_fields"] = label_fields_for(normalized["subtest"])
+    normalized["label_prompt_spec"] = copy.deepcopy(BASELINE_LABEL_PROMPT_SPEC)
     normalized["notes"] = DESIGN_GENERATE_NOTES
     normalized["design_requirements_source"] = "generate_image/docs/design.md"
     normalized["design_requirements"] = {
@@ -202,6 +231,7 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "position_map": EXPECTED_POSITIONS,
         "cell_quantity_rule": "one visible focal product unit per cell",
         "main_shelf_tag_fields": DESIGN_LABEL_FIELDS,
+        "main_shelf_tag_format": copy.deepcopy(BASELINE_LABEL_PROMPT_SPEC),
         "internal_only_fields": ["product_number", "sku_id"],
         "reference_sheet_only": True,
         "formal_product_image_policy": "product_image must exist for every SKU",
@@ -381,6 +411,7 @@ def write_requests(args: argparse.Namespace, payloads: list[dict[str, Any]]) -> 
                     "target_field": payload.get("target_field"),
                     "target_value": payload.get("target_value"),
                     "target_relation": payload.get("target_relation"),
+                    "label_prompt_spec": payload.get("label_prompt_spec"),
                     "correct_sku_id": payload["correct_sku_id"],
                     "correct_product_number": correct_product_number,
                     "design_requirements_source": payload["design_requirements_source"],
