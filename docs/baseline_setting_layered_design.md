@@ -1,3 +1,4 @@
+
 # Baseline Setting 分层实验设计
 
 本文档是 `baseline_setting_experiment_parameters.md` 的分层版：上层只记录全局 schema、baseline 类型、图片生成约束和实验集合；下层按 category 写每个实验的具体假定。完整实现细节仍以 `generate_image/experiments/build_min_capability_requests.py` 和 `generate_image/experiments/run_baseline_setting_images.py` 为准。
