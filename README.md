@@ -150,7 +150,7 @@ Baseline Setting 正式实验请求，不生图：
 python generate_image/run_baseline_setting_images.py \
   --scenario-set core \
   --datasets tortilla_chips \
-  --experiments budget brand flavor size raw_price unit_price price size_weight \
+  --experiments budget brand flavor size price size_weight \
   --baseline-image path/to/baseline.png \
   --output-root generate_image/output/baseline_setting
 ```
@@ -161,7 +161,7 @@ Baseline Setting 批量生图：
 python generate_image/run_baseline_setting_images.py \
   --scenario-set full \
   --datasets tortilla_chips cold_cereal coffee at_home_crackers carbonated_soft_drinks \
-  --experiments budget brand flavor size raw_price unit_price price size_weight \
+  --experiments budget brand flavor size price size_weight \
   --baseline-image path/to/baseline.png \
   --output-root generate_image/output/baseline_setting \
   --generate \
@@ -187,7 +187,7 @@ Baseline Setting 大批量续跑：
 python generate_image/run_baseline_setting_images.py \
   --scenario-set full \
   --datasets tortilla_chips cold_cereal coffee at_home_crackers carbonated_soft_drinks \
-  --experiments budget brand flavor size raw_price unit_price price size_weight \
+  --experiments budget brand flavor size price size_weight \
   --baseline-image path/to/baseline.png \
   --output-root generate_image/output/runs/baseline_setting/full_YYYYMMDD \
   --generate \
@@ -223,7 +223,7 @@ export OPENROUTER_API_KEYS="key1,key2,key3"
 python generate_image/run_baseline_setting_images.py \
   --scenario-set full \
   --datasets tortilla_chips cold_cereal coffee at_home_crackers carbonated_soft_drinks \
-  --experiments budget brand flavor size raw_price unit_price price size_weight \
+  --experiments budget brand flavor size price size_weight \
   --output-root generate_image/output/runs/baseline_setting/full_YYYYMMDD \
   --generate \
   --workers 3 \

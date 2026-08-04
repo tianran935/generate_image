@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import random
 import re
 import subprocess
@@ -33,6 +32,7 @@ REQUEST_SKU_FIELDS = {
     "product_image",
 }
 LABEL_FIELDS = ["price", "category_name", "item", "flavor", "size"]
+BUDGET_SUBTESTS = {"raw_price", "unit_price"}
 
 
 @dataclass(frozen=True)
@@ -334,6 +334,31 @@ def money_to_float(value: Any) -> float:
     return float(str(value).replace("$", ""))
 
 
+def as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def row_base_price(config: DatasetConfig, row: dict[str, Any]) -> float:
+    item_qty = as_float(row.get("item_qty"))
+    gross_amt = as_float(row.get("gross_amt"))
+    net_amt = as_float(row.get("net_amt"))
+    if item_qty and item_qty > 0:
+        amount = gross_amt if gross_amt and gross_amt > 0 else net_amt
+        if amount and amount > 0:
+            return max(0.49, amount / item_qty)
+    return config.base_price
+
+
+def random_money_offsets(rng: random.Random, count: int, low: float, high: float) -> list[float]:
+    offsets: set[float] = set()
+    while len(offsets) < count:
+        offsets.add(round(rng.uniform(low, high), 2))
+    return sorted(offsets)
+
+
 def positions() -> list[dict[str, int]]:
     return [{"row": row, "col": col} for row in (1, 2) for col in (1, 2, 3, 4)]
 
@@ -401,7 +426,9 @@ def payload(
     label_fields: list[str],
     target_field: str | None = None,
     target_value: str | None = None,
+    target_relation: str | None = None,
 ) -> dict[str, Any]:
+    task_family = "budget" if subtest in BUDGET_SUBTESTS else subtest
     item = {
         "mode": "generate",
         "category": config.category,
@@ -415,6 +442,8 @@ def payload(
             "only render the product packages and their shelf tags."
         ),
         "test_group": test_group,
+        "experiment": task_family,
+        "task_family": task_family,
         "subtest": subtest,
         "scenario_id": scenario_id,
         "prompt_instruction": prompt_instruction,
@@ -425,6 +454,8 @@ def payload(
     if target_field and target_value:
         item["target_field"] = target_field
         item["target_value"] = target_value
+    if target_relation:
+        item["target_relation"] = target_relation
     return item
 
 
@@ -433,6 +464,31 @@ def choose_rows(rows: list[dict[str, Any]], target_key: str, target_value: str, 
     non_targets = [row for row in rows if row[target_key] != target_value]
     if not targets or len(non_targets) < 7:
         raise ValueError(f"Cannot build unique {target_key}={target_value} scenario.")
+    chosen = [targets[0]] + non_targets[:7]
+    rng.shuffle(chosen)
+    return chosen
+
+
+def choose_size_rows(
+    rows: list[dict[str, Any]],
+    target_size: str,
+    relation: str,
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    target_weight = parse_weight_from_size(target_size)
+    if target_weight is None:
+        raise ValueError(f"Cannot parse size threshold: {target_size}")
+    weighted = rows_with_weight(rows)
+    if relation == "greater_than":
+        targets = [row for row in weighted if float(row["weight"]) > target_weight]
+        non_targets = [row for row in weighted if float(row["weight"]) <= target_weight]
+    elif relation == "less_than":
+        targets = [row for row in weighted if float(row["weight"]) < target_weight]
+        non_targets = [row for row in weighted if float(row["weight"]) >= target_weight]
+    else:
+        raise ValueError(f"Unsupported size relation: {relation}")
+    if not targets or len(non_targets) < 7:
+        raise ValueError(f"Cannot build unique size {relation} {target_size} scenario.")
     chosen = [targets[0]] + non_targets[:7]
     rng.shuffle(chosen)
     return chosen
@@ -457,39 +513,63 @@ def available_unique_values(
     return values
 
 
-def instruction_budget_scenario(
+def available_size_thresholds(
+    rows: list[dict[str, Any]],
+    preferred: tuple[str, ...],
+    relation: str,
+    needed: int,
+) -> list[str]:
+    weighted = rows_with_weight(rows)
+    sizes = {row["size"] for row in weighted}
+    ordered = list(preferred) + sorted(sizes - set(preferred), key=lambda size: parse_weight_from_size(size) or 0)
+    values = []
+    for size in ordered:
+        threshold = parse_weight_from_size(size)
+        if threshold is None:
+            continue
+        if relation == "greater_than":
+            target_count = sum(1 for row in weighted if float(row["weight"]) > threshold)
+            non_target_count = sum(1 for row in weighted if float(row["weight"]) <= threshold)
+        elif relation == "less_than":
+            target_count = sum(1 for row in weighted if float(row["weight"]) < threshold)
+            non_target_count = sum(1 for row in weighted if float(row["weight"]) >= threshold)
+        else:
+            raise ValueError(f"Unsupported size relation: {relation}")
+        if target_count >= 1 and non_target_count >= 7:
+            values.append(size)
+        if len(values) >= needed:
+            break
+    return values
+
+
+def budget_threshold_values(
+    budget: float,
+    target_index: int,
+    count: int,
+    rng: random.Random,
+) -> list[float]:
+    target_discount = rng.random() * budget
+    distractor_values = [budget + offset for offset in random_money_offsets(rng, count - 1, 0.05, 1.80)]
+    rng.shuffle(distractor_values)
+    values: list[float] = []
+    for index in range(count):
+        values.append(budget - target_discount if index == target_index else distractor_values.pop())
+    return values
+
+
+def choose_budget_rows(
     config: DatasetConfig,
     rows: list[dict[str, Any]],
     variant: int,
     rng: random.Random,
-) -> dict[str, Any]:
+) -> tuple[list[dict[str, Any]], int, float]:
     chosen = rows[variant : variant + 8]
     if len(chosen) < 8:
         chosen = rows[:8]
     rng.shuffle(chosen)
     budget = config.default_budget + 0.50 * variant
-    target_index = variant % 8
-    skus = []
-    correct_id = ""
-    for index, row in enumerate(chosen, start=1):
-        is_target = index - 1 == target_index
-        price = budget - 0.20 if is_target else budget + 0.45 + 0.18 * index
-        item = shelf_sku(config, row, index, price=price)
-        skus.append(item)
-        if is_target:
-            correct_id = item["sku_id"]
-    return payload(
-        config=config,
-        scenario_id=f"{config.slug}_budget_{variant + 1}",
-        test_group="instruction_following",
-        subtest="budget",
-        prompt_instruction=f"Choose the {config.product_term} product with price at or below {money(budget)}.",
-        skus=skus,
-        correct_sku_id=correct_id,
-        label_fields=LABEL_FIELDS.copy(),
-        target_field="price",
-        target_value=money(budget),
-    )
+    target_index = rng.randrange(len(chosen))
+    return chosen, target_index, budget
 
 
 def instruction_attribute_scenario(
@@ -505,11 +585,12 @@ def instruction_attribute_scenario(
     skus = []
     correct_id = ""
     for index, row in enumerate(chosen, start=1):
+        price = row_base_price(config, row)
         item = shelf_sku(
             config,
             row,
             index,
-            price=config.base_price + 0.12 * ((index + variant) % 5),
+            price=price,
         )
         skus.append(item)
         if row[key] == value:
@@ -533,6 +614,45 @@ def instruction_attribute_scenario(
     )
 
 
+def instruction_size_scenario(
+    config: DatasetConfig,
+    rows: list[dict[str, Any]],
+    target_size: str,
+    relation: str,
+    variant: int,
+    rng: random.Random,
+) -> dict[str, Any]:
+    chosen = choose_size_rows(rows, target_size, relation, rng)
+    skus = []
+    correct_id = ""
+    target_weight = parse_weight_from_size(target_size)
+    if target_weight is None:
+        raise ValueError(f"Cannot parse size threshold: {target_size}")
+    for index, row in enumerate(chosen, start=1):
+        price = row_base_price(config, row)
+        item = shelf_sku(config, row, index, price=price)
+        skus.append(item)
+        weight = float(row["weight"])
+        if relation == "greater_than" and weight > target_weight:
+            correct_id = item["sku_id"]
+        elif relation == "less_than" and weight < target_weight:
+            correct_id = item["sku_id"]
+    relation_text = "larger than" if relation == "greater_than" else "smaller than"
+    return payload(
+        config=config,
+        scenario_id=f"{config.slug}_size_{variant + 1}",
+        test_group="instruction_following",
+        subtest="size",
+        prompt_instruction=f"Choose the {config.product_term} product with size {relation_text} {target_size}.",
+        skus=skus,
+        correct_sku_id=correct_id,
+        label_fields=LABEL_FIELDS.copy(),
+        target_field="size",
+        target_value=target_size,
+        target_relation=relation,
+    )
+
+
 def article(word: str) -> str:
     return "an" if word[:1].lower() in {"a", "e", "i", "o", "u"} else "a"
 
@@ -543,15 +663,11 @@ def instruction_raw_price_scenario(
     variant: int,
     rng: random.Random,
 ) -> dict[str, Any]:
-    chosen = rows[variant : variant + 8]
-    if len(chosen) < 8:
-        chosen = rows[:8]
-    rng.shuffle(chosen)
-    target_index = variant % 8
+    chosen, target_index, budget = choose_budget_rows(config, rows, variant, rng)
+    prices = budget_threshold_values(budget, target_index, len(chosen), rng)
     skus = []
     correct_id = ""
-    for index, row in enumerate(chosen, start=1):
-        raw_price = config.base_price - 0.50 if index - 1 == target_index else config.base_price + 0.20 + 0.17 * index
+    for index, (row, raw_price) in enumerate(zip(chosen, prices), start=1):
         item = shelf_sku(config, row, index, price=raw_price, base_price=raw_price)
         skus.append(item)
         if index - 1 == target_index:
@@ -561,12 +677,12 @@ def instruction_raw_price_scenario(
         scenario_id=f"{config.slug}_raw_price_{variant + 1}",
         test_group="instruction_following",
         subtest="raw_price",
-        prompt_instruction=f"Choose the {config.product_term} product with the lowest raw price.",
+        prompt_instruction=f"Choose the {config.product_term} product with raw shelf price at or below {money(budget)}.",
         skus=skus,
         correct_sku_id=correct_id,
         label_fields=LABEL_FIELDS.copy(),
         target_field="base_price",
-        target_value="lowest",
+        target_value=money(budget),
     )
 
 
@@ -608,16 +724,12 @@ def instruction_unit_price_scenario(
     weighted = rows_with_weight(rows)
     if len(weighted) < 8:
         raise ValueError(f"{config.slug} has only {len(weighted)} SKU rows with parseable weight.")
-    chosen = weighted[variant : variant + 8]
-    if len(chosen) < 8:
-        chosen = weighted[:8]
-    rng.shuffle(chosen)
-    target_index = variant % 8
+    chosen, target_index, budget = choose_budget_rows(config, weighted, variant, rng)
+    unit_prices = budget_threshold_values(budget, target_index, len(chosen), rng)
     skus = []
     correct_id = ""
-    for index, row in enumerate(chosen, start=1):
-        unit_price = 0.18 if index - 1 == target_index else 0.26 + 0.015 * index
-        raw_price = max(0.49, round(float(row["weight"]) * unit_price, 2))
+    for index, (row, unit_price) in enumerate(zip(chosen, unit_prices), start=1):
+        raw_price = round(float(row["weight"]) * unit_price, 2)
         item = shelf_sku(config, row, index, price=raw_price, base_price=raw_price)
         skus.append(item)
         if index - 1 == target_index:
@@ -627,12 +739,12 @@ def instruction_unit_price_scenario(
         scenario_id=f"{config.slug}_unit_price_{variant + 1}",
         test_group="instruction_following",
         subtest="unit_price",
-        prompt_instruction=f"Choose the {config.product_term} product with the lowest unit price. Unit price is raw price divided by weight.",
+        prompt_instruction=f"Choose the {config.product_term} product with unit price at or below {money(budget)}. Unit price is raw price divided by weight.",
         skus=skus,
         correct_sku_id=correct_id,
         label_fields=LABEL_FIELDS.copy(),
         target_field="unit_price",
-        target_value="lowest",
+        target_value=money(budget),
     )
 
 
@@ -719,17 +831,20 @@ def build_payloads(
     price_anchor_index: int = 0,
 ) -> list[dict[str, Any]]:
     scenario_count = 2 if scenario_set == "full" else 1
-    payloads = [instruction_budget_scenario(config, rows, variant, rng) for variant in range(scenario_count)]
+    payloads: list[dict[str, Any]] = []
 
     brands = available_unique_values(rows, "brand", config.preferred_brands, scenario_count)
     flavors = available_unique_values(rows, "flavor", config.preferred_flavors, scenario_count)
-    sizes = available_unique_values(rows, "size", config.preferred_sizes, scenario_count)
     for variant, brand in enumerate(brands):
         payloads.append(instruction_attribute_scenario(config, rows, "brand", brand, variant, rng))
     for variant, flavor in enumerate(flavors):
         payloads.append(instruction_attribute_scenario(config, rows, "flavor", flavor, variant, rng))
-    for variant, size in enumerate(sizes):
-        payloads.append(instruction_attribute_scenario(config, rows, "size", size, variant, rng))
+    for variant in range(scenario_count):
+        relation = "greater_than" if variant % 2 == 0 else "less_than"
+        thresholds = available_size_thresholds(rows, config.preferred_sizes, relation, 1)
+        if not thresholds:
+            raise ValueError(f"Cannot build size {relation} scenario for {config.slug}.")
+        payloads.append(instruction_size_scenario(config, rows, thresholds[0], relation, variant, rng))
     for variant in range(scenario_count):
         payloads.append(instruction_raw_price_scenario(config, rows, variant, rng))
         payloads.append(instruction_unit_price_scenario(config, rows, variant, rng))
@@ -765,23 +880,30 @@ def validate_payload(item: dict[str, Any]) -> None:
     if len(correct) != 1:
         raise ValueError(f"{item['scenario_id']} does not have exactly one correct SKU id.")
     subtest = item["subtest"]
-    if subtest == "budget":
-        limit = float(str(item["target_value"]).strip("$"))
-        winners = [sku for sku in skus if money_to_float(sku["price"]) <= limit]
-    elif subtest == "brand":
+    if subtest == "brand":
         target = item["target_value"]
         dataset = item["scenario_id"].split("_brand", 1)[0]
         winners = [sku for sku in skus if infer_brand(dataset, sku["item"]) == target]
-    elif subtest in {"flavor", "size"}:
+    elif subtest == "flavor":
         target = item["target_value"]
         winners = [sku for sku in skus if sku[subtest] == target]
+    elif subtest == "size":
+        target_weight = parse_weight_from_size(item["target_value"])
+        if target_weight is None:
+            raise ValueError(f"{item['scenario_id']} has unparseable target size: {item['target_value']}")
+        relation = item.get("target_relation")
+        if relation == "greater_than":
+            winners = [sku for sku in skus if float(sku["weight"]) > target_weight]
+        elif relation == "less_than":
+            winners = [sku for sku in skus if float(sku["weight"]) < target_weight]
+        else:
+            raise ValueError(f"{item['scenario_id']} has invalid size relation: {relation}")
     elif subtest == "raw_price":
-        min_price = min(money_to_float(sku["base_price"]) for sku in skus)
-        winners = [sku for sku in skus if money_to_float(sku["base_price"]) == min_price]
+        limit = money_to_float(item["target_value"])
+        winners = [sku for sku in skus if money_to_float(sku["base_price"]) <= limit]
     elif subtest == "unit_price":
-        unit_prices = [(sku, money_to_float(sku["base_price"]) / float(sku["weight"])) for sku in skus]
-        min_unit = min(value for _, value in unit_prices)
-        winners = [sku for sku, value in unit_prices if math.isclose(value, min_unit, rel_tol=0, abs_tol=1e-9)]
+        limit = money_to_float(item["target_value"])
+        winners = [sku for sku in skus if money_to_float(sku["base_price"]) / float(sku["weight"]) <= limit]
     elif subtest == "price":
         min_price = min(money_to_float(sku["price"]) for sku in skus)
         winners = [sku for sku in skus if money_to_float(sku["price"]) == min_price]
@@ -805,7 +927,7 @@ def write_requests(output_root: Path, all_payloads: list[dict[str, Any]]) -> lis
         correct_product_number = next(
             index for index, sku in enumerate(item["skus"], start=1) if sku["sku_id"] == item["correct_sku_id"]
         )
-        case_dir = output_root / dataset / item["test_group"] / item["subtest"]
+        case_dir = output_root / dataset / item["test_group"] / item["task_family"] / item["subtest"]
         request_file = case_dir / "requests" / f"{item['scenario_id']}.json"
         screen_file = case_dir / "screens" / f"{item['scenario_id']}.png"
         request_file.parent.mkdir(parents=True, exist_ok=True)
@@ -817,11 +939,14 @@ def write_requests(output_root: Path, all_payloads: list[dict[str, Any]]) -> lis
                 "category": item["category"],
                 "scenario_id": item["scenario_id"],
                 "test_group": item["test_group"],
+                "experiment": item["experiment"],
+                "task_family": item["task_family"],
                 "subtest": item["subtest"],
                 "scene_type": "realistic_2x4_grocery_shelf",
                 "prompt_instruction": item["prompt_instruction"],
                 "target_field": item.get("target_field"),
                 "target_value": item.get("target_value"),
+                "target_relation": item.get("target_relation"),
                 "correct_sku_id": item["correct_sku_id"],
                 "correct_product_number": correct_product_number,
                 "request_file": str(request_file),

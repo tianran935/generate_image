@@ -37,8 +37,9 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = ROOT / "generate_image" / "output" / "runs" / "baseline_setting"
-DEFAULT_EXPERIMENTS = ("budget", "brand", "flavor", "size", "raw_price", "unit_price", "price", "size_weight")
-ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS
+BUDGET_SUBTESTS = {"raw_price", "unit_price"}
+DEFAULT_EXPERIMENTS = ("budget", "brand", "flavor", "size", "price", "size_weight")
+ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + ("raw_price", "unit_price")
 DATASET_BY_SLUG = {config.slug: config for config in DATASETS}
 EXPECTED_POSITIONS = {
     1: {"row": 1, "col": 1},
@@ -95,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         choices=ALL_EXPERIMENTS,
         default=list(DEFAULT_EXPERIMENTS),
-        help="Baseline experiments to include. Defaults to the four Baseline Setting experiments.",
+        help="Top-level Baseline experiments to include. Choosing budget includes raw_price and unit_price subtests.",
     )
     parser.add_argument(
         "--edit-source",
@@ -156,6 +157,15 @@ def selected_experiments(args: argparse.Namespace) -> set[str]:
     return set(args.experiments)
 
 
+def task_family_for(subtest: str) -> str:
+    return "budget" if subtest in BUDGET_SUBTESTS else subtest
+
+
+def selected_payload(payload: dict[str, Any], experiments: set[str]) -> bool:
+    subtest = payload["subtest"]
+    return subtest in experiments or task_family_for(subtest) in experiments
+
+
 def dataset_from_scenario_id(payload: dict[str, Any]) -> str:
     return payload["scenario_id"].split("_" + payload["subtest"], 1)[0]
 
@@ -181,6 +191,8 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = copy.deepcopy(payload)
     normalized["mode"] = "generate"
     normalized["baseline_setting"] = True
+    normalized["task_family"] = task_family_for(normalized["subtest"])
+    normalized["experiment"] = normalized["task_family"]
     normalized["baseline_family"] = baseline_family(normalized["subtest"])
     normalized["experiment_label_fields"] = label_fields_for(normalized["subtest"])
     normalized["notes"] = DESIGN_GENERATE_NOTES
@@ -241,7 +253,7 @@ def validate_design_payload(payload: dict[str, Any]) -> None:
             raise ValueError(f"{payload['scenario_id']} SKU #{number} price must use two decimal places: {sku['price']}")
         if not Path(str(sku["product_image"])).exists():
             raise FileNotFoundError(f"{payload['scenario_id']} SKU #{number} product_image not found: {sku['product_image']}")
-    if payload["subtest"] in {"unit_price", "size_weight"}:
+    if payload["subtest"] in {"unit_price", "size", "size_weight"}:
         for sku in skus:
             if float(sku["weight"]) <= 0:
                 raise ValueError(f"{payload['scenario_id']} requires parseable positive weight for every SKU.")
@@ -264,16 +276,16 @@ def build_all_payloads(args: argparse.Namespace) -> list[dict[str, Any]]:
         if len(rows) < 8:
             raise ValueError(f"{config.slug} has only {len(rows)} SKU rows with images.")
         for payload in build_payloads(config, rows, scenario_set, rng, price_anchor_index=args.price_anchor_index):
-            if payload["subtest"] in experiments:
+            if selected_payload(payload, experiments):
                 payloads.append(normalize_payload(payload))
     return payloads
 
 
 def group_key(args: argparse.Namespace, payload: dict[str, Any]) -> tuple[str, str]:
     if args.edit_source_scope == "dataset":
-        return (dataset_from_scenario_id(payload), payload["subtest"])
+        return (dataset_from_scenario_id(payload), payload["task_family"])
     if args.edit_source_scope == "experiment":
-        return ("all_datasets", payload["subtest"])
+        return ("all_datasets", payload["task_family"])
     return ("all_datasets", "all_experiments")
 
 
@@ -316,7 +328,7 @@ def write_requests(args: argparse.Namespace, payloads: list[dict[str, Any]]) -> 
         raise FileNotFoundError(f"Original image is missing or empty: {args.original_image}")
     original_payload = load_original_payload(args)
     groups = grouped_payloads(args, payloads)
-    for (group_dataset, group_subtest), items in sorted(groups.items()):
+    for (group_dataset, group_family), items in sorted(groups.items()):
         first_screen: Path | None = None
         previous_screen: Path | None = None
         first_payload: dict[str, Any] | None = original_payload
@@ -326,7 +338,8 @@ def write_requests(args: argparse.Namespace, payloads: list[dict[str, Any]]) -> 
             mode = "edit"
             dataset = dataset_from_scenario_id(payload)
             subtest = payload["subtest"]
-            case_dir = args.output_root / dataset / subtest
+            task_family = payload["task_family"]
+            case_dir = args.output_root / dataset / task_family / subtest
             request_file = case_dir / "requests" / f"{order:03d}_{payload['scenario_id']}.json"
             screen_file = case_dir / "screens" / f"{order:03d}_{payload['scenario_id']}.png"
             payload["mode"] = mode
@@ -352,19 +365,22 @@ def write_requests(args: argparse.Namespace, payloads: list[dict[str, Any]]) -> 
                 {
                     "dataset": dataset,
                     "category": payload["category"],
-                    "experiment": subtest,
+                    "experiment": task_family,
+                    "task_family": task_family,
+                    "subtest": subtest,
                     "scenario_id": payload["scenario_id"],
-                    "item_key": f"{dataset}/{subtest}/{order:03d}_{payload['scenario_id']}",
+                    "item_key": f"{dataset}/{task_family}/{subtest}/{order:03d}_{payload['scenario_id']}",
                     "mode": mode,
                     "generation_order": order,
                     "baseline_family": payload["baseline_family"],
                     "edit_source_policy": args.edit_source,
                     "edit_source_scope": args.edit_source_scope,
-                    "group_key": f"{group_dataset}/{group_subtest}",
+                    "group_key": f"{group_dataset}/{group_family}",
                     "input_image": payload.get("input_image"),
                     "prompt_instruction": payload["prompt_instruction"],
                     "target_field": payload.get("target_field"),
                     "target_value": payload.get("target_value"),
+                    "target_relation": payload.get("target_relation"),
                     "correct_sku_id": payload["correct_sku_id"],
                     "correct_product_number": correct_product_number,
                     "design_requirements_source": payload["design_requirements_source"],
@@ -435,7 +451,8 @@ def utc_now() -> str:
 
 
 def item_key(item: dict[str, Any]) -> str:
-    return str(item.get("item_key") or f"{item['dataset']}/{item['experiment']}/{item['generation_order']:03d}_{item['scenario_id']}")
+    subtest_part = f"/{item['subtest']}" if item.get("subtest") else ""
+    return str(item.get("item_key") or f"{item['dataset']}/{item['experiment']}{subtest_part}/{item['generation_order']:03d}_{item['scenario_id']}")
 
 
 def output_ready(path: Path) -> bool:
@@ -539,6 +556,8 @@ def update_item_status(
             "item_key": key,
             "dataset": item["dataset"],
             "experiment": item["experiment"],
+            "task_family": item.get("task_family", item["experiment"]),
+            "subtest": item.get("subtest", item["experiment"]),
             "scenario_id": item["scenario_id"],
             "mode": item["mode"],
             "generation_order": item["generation_order"],

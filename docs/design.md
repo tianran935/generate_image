@@ -121,7 +121,7 @@ Instruction following:
 - `budget`: 8 个不同 SKU，只有 1 个 SKU 的 `price <= target budget`。
 - `brand`: 8 个不同 SKU，目标品牌只出现 1 次；brand 从 `item`/包装图推断，不作为 SKU 字段。
 - `flavor`: 8 个不同 SKU，只有 1 个 SKU 的 `flavor == target flavor`。
-- `size`: 8 个不同 SKU，只有 1 个 SKU 的 `size == target size`。
+- `size`: 8 个不同 SKU，只有 1 个 SKU 的 `size > target size` 或 `size < target size`；比较时使用从 size 解析出的 `weight`。
 - `raw_price`: 8 个不同 SKU，正确答案为 `base_price` 最低的 SKU。
 - `unit_price`: 8 个不同 SKU，且每个 SKU 都有可解析 `weight`；正确答案为 `base_price / weight` 最低的 SKU。
 
